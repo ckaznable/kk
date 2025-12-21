@@ -1,0 +1,12 @@
+[package]
+name = "kk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+enclose = { workspace = true }
+fltk = { version = "^1.5", features = ["enable-glwindow"] }
+fltk-theme = "0.7.9"
+libmpv2 = { git = "https://github.com/ckaznable/libmpv2-rs.git" }
+

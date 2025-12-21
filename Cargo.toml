@@ -1,14 +1,15 @@
-[package]
-name = "kk"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = [
+    "packages/kk",
+    "packages/kr",
+]
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 enclose = "1.2.1"
-fltk = { version = "^1.5", features = ["enable-glwindow"] }
-fltk-theme = "0.7.9"
-libmpv2 = { git = "https://github.com/ckaznable/libmpv2-rs.git" }
+serde = "1.0"
+tokio = { version = "1", features = ["full"] }
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

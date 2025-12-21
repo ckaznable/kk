@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "packages/dirs",
     "packages/kk",
     "packages/kr",
 ]
@@ -10,6 +11,7 @@ anyhow = "1"
 enclose = "1.2.1"
 serde = "1.0"
 tokio = { version = "1", features = ["full"] }
+dirs = { path = "./packages/dirs" }
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

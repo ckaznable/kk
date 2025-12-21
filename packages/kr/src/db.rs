@@ -1,32 +1,39 @@
-use std::path::PathBuf;
+use ahash::AHashSet;
+use anyhow::Result;
+use std::{
+    path::{Path, PathBuf}, time::SystemTime
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::Movie;
+use crate::{Movie, util::find_new_movie_dirs};
 
-const DIRTY_FAV: u8 = 1;
-const DIRTY_ADDED_TIME: u8 = 1 << 1;
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Config {
+    pub movies: Vec<MovieData>,
+    pub last_scan_time: SystemTime,
+}
 
-#[derive(Clone, Copy)]
-struct DirtyMark(u8);
-
-impl Default for DirtyMark {
+impl Default for Config {
     fn default() -> Self {
-        Self(255)
+        Self {
+            movies: Default::default(),
+            last_scan_time: SystemTime::UNIX_EPOCH,
+        }
     }
 }
 
-impl DirtyMark {
-    pub fn dirty(&mut self) {
-        self.0 = 255;
-    }
+pub struct IndexCacheTable {
+    pub idx: Option<Vec<u32>>,
+    pub dirty: bool,
+}
 
-    pub fn clear(&mut self, mask: u8) {
-        self.0 &= !mask;
-    }
-
-    pub fn is_dirty(&self, mask: u8) -> bool {
-        self.0 & mask != 0
+impl Default for IndexCacheTable {
+    fn default() -> Self {
+        Self {
+            idx: Default::default(),
+            dirty: true
+        }
     }
 }
 
@@ -39,46 +46,97 @@ pub struct MovieData {
 }
 
 pub struct SimpleJsonDatabase {
-    path: PathBuf,
-    items: Vec<MovieData>,
-    dirty: DirtyMark,
-    page_size: usize,
+    config: Config,
     index_ref: Vec<u32>,
-    order_by_fav_index: Option<Vec<u32>>,
-    order_by_added_time_index: Option<Vec<u32>>,
+    order_by_fav_index: IndexCacheTable,
+    order_by_added_time_index: IndexCacheTable,
 }
 
 impl SimpleJsonDatabase {
-    pub fn new() -> Self {
-        todo!()
+    pub fn new(path: PathBuf) -> Result<Self> {
+        let config = Self::load(&path)?;
+        let index_ref = (0..config.movies.len() as u32).collect();
+
+        Ok(Self {
+            config,
+            index_ref,
+            order_by_fav_index: IndexCacheTable::default(),
+            order_by_added_time_index: IndexCacheTable::default(),
+        })
+    }
+
+    pub fn load(path: &Path) -> Result<Config> {
+        let mut config = Self::init_config()?;
+        let known_files: AHashSet<PathBuf> =
+            config.movies.iter().map(|item| item.path.clone()).collect();
+
+        let new_dirs = find_new_movie_dirs(path, config.last_scan_time, &known_files)?;
+        let new_list_iter = new_dirs
+            .into_iter()
+            .flat_map(|p| Self::load_movie_from_nfo(&p));
+
+        config.movies.extend(new_list_iter);
+        Ok(config)
+    }
+
+    #[inline]
+    fn config_dir() -> PathBuf {
+        dirs::DIR.config_local_dir().join("kr.json")
+    }
+
+    pub fn load_movie_from_nfo(path: &Path) -> Option<MovieData> {
+        let movie_name = path.file_name()?.to_string_lossy();
+        let nfo = path.join(format!("{movie_name}.nfo"));
+        if !nfo.exists() {
+            return None;
+        }
+
+        let nfo = std::fs::read_to_string(nfo).ok()?;
+        let nfo: MovieData = quick_xml::de::from_str(&nfo).ok()?;
+        Some(nfo)
+    }
+
+    pub fn init_config() -> Result<Config> {
+        let config_path = Self::config_dir();
+        if !config_path.exists() {
+            std::fs::create_dir_all(config_path)?;
+            Ok(Config::default())
+        } else {
+            let content = std::fs::read_to_string(config_path)?;
+            Ok(serde_json::from_str(&content)?)
+        }
     }
 
     pub fn rebuild_index_ref(&mut self) {
-        self.index_ref = (0..self.items.len() as u32).collect();
+        self.index_ref = (0..self.config.movies.len() as u32).collect();
     }
 
     pub fn reload(&mut self) {
-        self.dirty.dirty();
+        self.order_by_fav_index.dirty = false;
+        self.order_by_added_time_index.dirty = false;
         self.rebuild_index_ref();
         todo!()
     }
 
     pub fn flush(&self) {
-        todo!()
+        let config_path = Self::config_dir();
+        if let Ok(content) = serde_json::to_string(&self.config) {
+            std::fs::write(config_path, content).ok();
+        }
     }
 
-    pub fn order_by_fav<'a>(&'a mut self) -> SimpleJsonDatabaseSlice<'a> {
-        if !self.dirty.is_dirty(DIRTY_FAV) && let Some(ref idx) = self.order_by_fav_index {
-            return SimpleJsonDatabaseSlice::new(&self.items, idx);
+    pub fn order_by_fav<'a>(&'a mut self) -> DatabaseSlice<'a> {
+        if !self.order_by_fav_index.dirty && let Some(ref idx) = self.order_by_fav_index.idx {
+            return DatabaseSlice::new(&self.config.movies, idx);
         }
 
-        self.dirty.clear(DIRTY_FAV);
+        self.order_by_fav_index.dirty = false;
         let data: Vec<u32> = self
             .index_ref
             .iter()
             .copied()
             .filter(|i| {
-                if let Some(d) = self.items.get(*i as usize) {
+                if let Some(d) = self.config.movies.get(*i as usize) {
                     d.fav
                 } else {
                     false
@@ -86,42 +144,43 @@ impl SimpleJsonDatabase {
             })
             .collect();
 
-        let index = self.order_by_fav_index.insert(data);
-        SimpleJsonDatabaseSlice::new(&self.items, index)
+        let index = self.order_by_fav_index.idx.insert(data);
+        DatabaseSlice::new(&self.config.movies, index)
     }
 
-    pub fn order_by_added_time<'a>(&'a mut self) -> SimpleJsonDatabaseSlice<'a> {
-        if !self.dirty.is_dirty(DIRTY_ADDED_TIME) && let Some(ref idx) = self.order_by_added_time_index {
-            return SimpleJsonDatabaseSlice::new(&self.items, idx);
+    pub fn order_by_added_time<'a>(&'a mut self) -> DatabaseSlice<'a> {
+        if !self.order_by_added_time_index.dirty && let Some(ref idx) = self.order_by_added_time_index.idx {
+            return DatabaseSlice::new(&self.config.movies, idx);
         }
 
-        self.dirty.clear(DIRTY_ADDED_TIME);
+        self.order_by_added_time_index.dirty = false;
         let mut data: Vec<u32> = self.index_ref.to_vec();
         data.sort_unstable_by(|a, b| b.cmp(a));
 
-        let index = self.order_by_added_time_index.insert(data);
-        SimpleJsonDatabaseSlice::new(&self.items, index)
+        let index = self.order_by_added_time_index.idx.insert(data);
+        DatabaseSlice::new(&self.config.movies, index)
     }
 }
 
-pub struct SimpleJsonDatabaseSlice<'a> {
+pub struct DatabaseSlice<'a> {
     items: &'a [MovieData],
     index: &'a [u32],
     i: usize,
 }
 
-impl<'a> SimpleJsonDatabaseSlice<'a> {
+impl<'a> DatabaseSlice<'a> {
     pub fn new(items: &'a [MovieData], index: &'a [u32]) -> Self {
         Self { items, index, i: 0 }
     }
 }
 
-impl<'a> Iterator for SimpleJsonDatabaseSlice<'a> {
+impl<'a> Iterator for DatabaseSlice<'a> {
     type Item = &'a MovieData;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.i += 1;
-        self.index.get(self.i - 1)
+        self.index
+            .get(self.i - 1)
             .and_then(|i| self.items.get(*i as usize))
     }
 }

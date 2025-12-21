@@ -10,13 +10,7 @@ use fltk::{
     prelude::{WidgetBase, WidgetExt},
 };
 
-type CustomHandler = dyn FnMut(Frame, Event, ProgressRef) -> bool;
-
-pub struct ProgressRef {
-    pub val: Rc<Cell<f64>>,
-    pub is_dragging: Rc<Cell<bool>>,
-    pub marked: Rc<RefCell<Vec<f64>>>,
-}
+type CustomHandler = dyn FnMut(Frame, Event) -> bool;
 
 pub struct FlatProgressBar {
     wid: Frame,
@@ -49,7 +43,7 @@ impl FlatProgressBar {
                         w.y(),
                         fill_width,
                         w.h(),
-                        Color::from_u32(0x3B8ED0),
+                        Color::from_rgb(255, 144, 19),
                     );
                 }
 
@@ -93,11 +87,7 @@ impl FlatProgressBar {
                 };
 
                 if let Some(ref mut handler) = *frame_handle.borrow_mut() {
-                    let custom_handle = handler(w.clone(), ev, ProgressRef {
-                        val: val.clone(),
-                        is_dragging: is_dragging.clone(),
-                        marked: marked.clone(),
-                    });
+                    let custom_handle = handler(w.clone(), ev);
 
                     inner_handle || custom_handle
                 } else {
@@ -128,7 +118,7 @@ impl FlatProgressBar {
 
     pub fn handle<F>(&mut self, f: F)
     where
-        F: FnMut(Frame, Event, ProgressRef) -> bool + 'static
+        F: FnMut(Frame, Event) -> bool + 'static
     {
         *self.frame_handle.borrow_mut() = Some(Box::new(f));
     }

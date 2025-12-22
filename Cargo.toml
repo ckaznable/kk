@@ -10,7 +10,6 @@ members = [
 anyhow = "1"
 enclose = "1.2.1"
 serde = "1.0"
-tokio = { version = "1", features = ["full"] }
 dirs = { path = "./packages/dirs" }
 
 [profile.release]

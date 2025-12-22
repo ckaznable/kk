@@ -152,11 +152,9 @@ impl SimpleJsonDatabase {
             .iter()
             .copied()
             .filter(|i| {
-                if let Some(d) = self.config.movies.get(*i as usize) {
-                    d.fav
-                } else {
-                    false
-                }
+                self.config.movies.get(*i as usize)
+                    .map(|d| d.fav)
+                    .unwrap_or(false)
             })
             .collect();
 

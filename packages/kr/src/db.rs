@@ -76,11 +76,18 @@ impl SimpleJsonDatabase {
             .flat_map(|p| Self::load_movie_from_nfo(&p));
 
         config.movies.extend(new_list_iter);
+        config.last_scan_time = SystemTime::now();
+
+        // update cache
+        if let Ok(content) = serde_json::to_string(&config) {
+            std::fs::write(Self::config_path(), content).ok();
+        }
+
         Ok(config)
     }
 
     #[inline]
-    fn config_dir() -> PathBuf {
+    fn config_path() -> PathBuf {
         dirs::DIR.config_local_dir().join("kr.json")
     }
 
@@ -97,7 +104,7 @@ impl SimpleJsonDatabase {
     }
 
     pub fn init_config() -> Result<Config> {
-        let config_path = Self::config_dir();
+        let config_path = Self::config_path();
         if !config_path.exists() {
             std::fs::create_dir_all(config_path)?;
             Ok(Config::default())
@@ -107,19 +114,17 @@ impl SimpleJsonDatabase {
         }
     }
 
-    pub fn rebuild_index_ref(&mut self) {
-        self.index_ref = (0..self.config.movies.len() as u32).collect();
-    }
-
     pub fn reload(&mut self) {
-        self.order_by_fav_index.dirty = false;
-        self.order_by_added_time_index.dirty = false;
-        self.rebuild_index_ref();
-        todo!()
+        if let Ok(config) = Self::load(&Self::config_path()) {
+            self.config = config;
+            self.order_by_fav_index.dirty = true;
+            self.order_by_added_time_index.dirty = true;
+            self.index_ref = (0..self.config.movies.len() as u32).collect();
+        }
     }
 
     pub fn flush(&self) {
-        let config_path = Self::config_dir();
+        let config_path = Self::config_path();
         if let Ok(content) = serde_json::to_string(&self.config) {
             std::fs::write(config_path, content).ok();
         }

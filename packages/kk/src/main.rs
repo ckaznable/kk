@@ -216,23 +216,19 @@ fn main() {
 
                 let is_fullscreen = v.unwrap_or(!win.fullscreen_active());
                 if is_fullscreen {
-                    println!("f hide");
                     controls.hide();
                     win.set_cursor(Cursor::None);
                 } else {
-                    println!("f show");
                     controls.show();
                     win.set_cursor(Cursor::Default);
                 }
                 win.fullscreen(is_fullscreen);
             }
             HideControl => {
-                println!("hide con");
                 controls.hide();
                 win.set_cursor(Cursor::None);
             }
             ShowControl => {
-                println!("show con");
                 controls.show();
                 win.set_cursor(Cursor::Default);
             }

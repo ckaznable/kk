@@ -6,7 +6,7 @@ use std::{
 
 use ahash::AHashSet;
 
-pub fn find_new_movie_dirs(
+pub fn find_new_movie_nfo(
     root: &Path,
     last_scan_time: SystemTime,
     known_files: &AHashSet<PathBuf>,
@@ -46,31 +46,41 @@ pub fn find_new_movie_dirs(
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
+
+        let Ok(dir_mtime) = metadata.modified() else {
+            continue;
+        };
+
+        if dir_mtime <= last_scan_time {
+            continue;
+        }
+
         let file_type = metadata.file_type();
+        if file_type.is_file() && is_nfo_file(known_files, &path) {
+            new_files.push(path);
+            continue;
+        }
 
-        if file_type.is_dir() {
-            let Ok(dir_mtime) = metadata.modified() else {
-                continue;
-            };
+        if file_type.is_dir() && let Ok(sub_entries) = fs::read_dir(&path) {
+            let sub_entries = sub_entries.into_iter();
+            for sub_entry in sub_entries {
+                let Ok(sub_entry) = sub_entry else {
+                    continue;
+                };
 
-            if dir_mtime <= last_scan_time {
-                continue;
-            }
-
-            if let Ok(sub_entries) = fs::read_dir(&path) {
-                let sub_entries = sub_entries.into_iter();
-                for sub_entry in sub_entries {
-                    let Ok(sub_entry) = sub_entry else {
-                        continue;
-                    };
-                    let sub_path = sub_entry.path();
-                    if !sub_path.is_file() && !known_files.contains(&sub_path) {
-                        new_files.push(sub_path);
-                    }
+                let sub_path = sub_entry.path();
+                if sub_path.is_file() && is_nfo_file(known_files, &sub_path) {
+                    new_files.push(sub_path);
                 }
             }
         }
     }
 
     Ok(new_files)
+}
+
+pub fn is_nfo_file(known_files: &AHashSet<PathBuf>, path: &Path) -> bool {
+    path.extension()
+        .map(|ext| ext == "nfo" && !known_files.contains(path))
+        .unwrap_or(false)
 }

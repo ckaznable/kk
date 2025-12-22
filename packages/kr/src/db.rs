@@ -1,3 +1,4 @@
+use log::warn;
 use ahash::AHashSet;
 use anyhow::Result;
 use std::{
@@ -6,9 +7,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Movie, util::find_new_movie_dirs};
+use crate::{Movie, util::find_new_movie_nfo};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     pub movies: Vec<MovieData>,
     pub last_scan_time: SystemTime,
@@ -23,6 +24,7 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug)]
 pub struct IndexCacheTable {
     pub idx: Option<Vec<u32>>,
     pub dirty: bool,
@@ -37,14 +39,15 @@ impl Default for IndexCacheTable {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MovieData {
     pub path: PathBuf,
     pub movie: Movie,
-    pub added_time: u64,
+    pub added_time: SystemTime,
     pub fav: bool,
 }
 
+#[derive(Debug)]
 pub struct SimpleJsonDatabase {
     config: Config,
     index_ref: Vec<u32>,
@@ -70,10 +73,11 @@ impl SimpleJsonDatabase {
         let known_files: AHashSet<PathBuf> =
             config.movies.iter().map(|item| item.path.clone()).collect();
 
-        let new_dirs = find_new_movie_dirs(path, config.last_scan_time, &known_files)?;
-        let new_list_iter = new_dirs
+        let now = SystemTime::now();
+        let new_nfos = find_new_movie_nfo(path, config.last_scan_time, &known_files)?;
+        let new_list_iter = new_nfos
             .into_iter()
-            .flat_map(|p| Self::load_movie_from_nfo(&p));
+            .flat_map(|p| Self::load_movie_from_nfo(&p, now));
 
         config.movies.extend(new_list_iter);
         config.last_scan_time = SystemTime::now();
@@ -91,22 +95,29 @@ impl SimpleJsonDatabase {
         dirs::DIR.config_local_dir().join("kr.json")
     }
 
-    pub fn load_movie_from_nfo(path: &Path) -> Option<MovieData> {
-        let movie_name = path.file_name()?.to_string_lossy();
-        let nfo = path.join(format!("{movie_name}.nfo"));
-        if !nfo.exists() {
+    pub fn load_movie_from_nfo(path: &Path, added_time: SystemTime) -> Option<MovieData> {
+        if !path.exists() {
             return None;
         }
 
-        let nfo = std::fs::read_to_string(nfo).ok()?;
-        let nfo: MovieData = quick_xml::de::from_str(&nfo).ok()?;
-        Some(nfo)
+        let nfo = std::fs::read_to_string(path).ok()?;
+        let Ok(movie) = quick_xml::de::from_str(&nfo) else {
+            warn!("{path:?} nfo parse failed");
+            return None;
+        };
+
+        Some(MovieData {
+            path: path.to_owned(),
+            movie,
+            added_time,
+            fav: false,
+        })
     }
 
     pub fn init_config() -> Result<Config> {
         let config_path = Self::config_path();
         if !config_path.exists() {
-            std::fs::create_dir_all(config_path)?;
+            std::fs::create_dir_all(config_path.parent().unwrap())?;
             Ok(Config::default())
         } else {
             let content = std::fs::read_to_string(config_path)?;

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod db;
 pub mod util;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Movie {
     pub title: String,
     pub outline: Option<String>,
@@ -20,7 +20,7 @@ pub struct Movie {
     pub website: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Actor {
     pub name: String,
     pub role: Option<String>,

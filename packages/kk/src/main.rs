@@ -29,8 +29,8 @@ enum AppHandleEvent {
     GoToVideo(String),
     GoToMenu,
     FullScreen(Option<bool>),
-    HideControl,
-    ShowControl,
+    HideControlInFullScreen,
+    ShowControlInFullScreen,
 }
 
 #[derive(Clone, Debug)]
@@ -68,7 +68,7 @@ fn main() {
     menu_group.end();
 
     let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
-    let (video_layer, mut controls, mut progress_bar) = mpv_window(mpv_tx.clone());
+    let (video_layer, mut controls, mut progress_bar) = mpv_window();
     video_group.end();
 
     wizard.end();
@@ -157,6 +157,39 @@ fn main() {
         }
     }));
 
+    let mut last_seek_time = Instant::now();
+    let throttle_duration = Duration::from_millis(150);
+    progress_bar.handle(enclose!((mpv_tx) move |w, ev| {
+        use fltk::enums::Event;
+
+        let get_progress = |w: &Frame| {
+            let mouse_x = app::event_x() - w.x();
+            let pct = mouse_x as f64 / w.w() as f64;
+            pct * 100.
+        };
+
+        match ev {
+            Event::Push => {
+                mpv_tx.send(MpvEvent::DragStart).ok();
+                true
+            }
+            Event::Drag => {
+                if last_seek_time.elapsed() >= throttle_duration {
+                    mpv_tx.send(MpvEvent::Seek(get_progress(&w))).ok();
+                    last_seek_time = Instant::now();
+                    true
+                } else {
+                    false
+                }
+            }
+            Event::Released => {
+                mpv_tx.send(MpvEvent::DragEnd(get_progress(&w))).ok();
+                true
+            }
+            _ => false
+        }
+    }));
+
     win.handle(enclose!((app_tx, mpv_tx) move |win, ev| {
         match ev {
             Event::KeyDown|Event::Shortcut => {
@@ -224,19 +257,23 @@ fn main() {
                 }
                 win.fullscreen(is_fullscreen);
             }
-            HideControl => {
-                controls.hide();
-                win.set_cursor(Cursor::None);
+            HideControlInFullScreen => {
+                if win.fullscreen_active() {
+                    controls.hide();
+                    win.set_cursor(Cursor::None);
+                }
             }
-            ShowControl => {
-                controls.show();
-                win.set_cursor(Cursor::Default);
+            ShowControlInFullScreen => {
+                if win.fullscreen_active() {
+                    controls.show();
+                    win.set_cursor(Cursor::Default);
+                }
             }
         }
     }
 }
 
-fn mpv_controls(tx: Sender<MpvEvent>) -> (Window, FlatProgressBar) {
+fn mpv_controls() -> (Window, FlatProgressBar) {
     let mut controls = Window::default()
         .with_pos(0, INIT_WIN_HEIGHT - CONTROLS_HEIGHT)
         .with_size(CONTROLS_WIDTH, CONTROLS_HEIGHT)
@@ -245,45 +282,12 @@ fn mpv_controls(tx: Sender<MpvEvent>) -> (Window, FlatProgressBar) {
     controls.set_color(Color::from_rgba(0, 0, 0, 150));
     controls.set_border(false);
 
-    let mut progress_bar = FlatProgressBar::new(0, 0, INIT_WIN_WIDTH, CONTROLS_HEIGHT);
-    let mut last_seek_time = Instant::now();
-    let throttle_duration = Duration::from_millis(150);
-    progress_bar.handle(enclose!((tx) move |w, ev| {
-        use fltk::enums::Event;
-
-        let get_progress = |w: &Frame| {
-            let mouse_x = app::event_x() - w.x();
-            let pct = mouse_x as f64 / w.w() as f64;
-            pct * 100.
-        };
-
-        match ev {
-            Event::Push => {
-                tx.send(MpvEvent::DragStart).ok();
-                true
-            }
-            Event::Drag => {
-                if last_seek_time.elapsed() >= throttle_duration {
-                    tx.send(MpvEvent::Seek(get_progress(&w))).ok();
-                    last_seek_time = Instant::now();
-                    true
-                } else {
-                    false
-                }
-            }
-            Event::Released => {
-                tx.send(MpvEvent::DragEnd(get_progress(&w))).ok();
-                true
-            }
-            _ => false
-        }
-    }));
-
+    let progress_bar = FlatProgressBar::new(0, 0, INIT_WIN_WIDTH, CONTROLS_HEIGHT);
     controls.end();
     (controls, progress_bar)
 }
 
-fn mpv_window(tx: Sender<MpvEvent>) -> (GlWindow, Window, FlatProgressBar) {
+fn mpv_window() -> (GlWindow, Window, FlatProgressBar) {
     let mut video_layer = GlWindow::default()
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
         .with_label("");
@@ -291,7 +295,7 @@ fn mpv_window(tx: Sender<MpvEvent>) -> (GlWindow, Window, FlatProgressBar) {
     video_layer.set_border(false);
     video_layer.end();
 
-    let (controls, progress_bar) = mpv_controls(tx.clone());
+    let (controls, progress_bar) = mpv_controls();
 
     (video_layer, controls, progress_bar)
 }

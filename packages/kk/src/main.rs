@@ -1,6 +1,6 @@
 use enclose::enclose;
 use fltk::{
-    app, draw,
+    app::{self, TimeoutHandle}, draw,
     enums::{Color, Cursor, Event, Key},
     frame::Frame,
     group::{Group, Wizard},
@@ -9,9 +9,7 @@ use fltk::{
 };
 use libmpv2::Mpv;
 use std::{
-    env,
-    sync::mpsc::Sender,
-    time::{Duration, Instant},
+    cell::Cell, env, rc::Rc, time::{Duration, Instant}
 };
 
 use crate::ui::progress_bar::FlatProgressBar;
@@ -39,7 +37,7 @@ enum MpvEvent {
     DragStart,
     DragEnd(f64),
     LoadFile(String),
-    TogglePause,
+    TogglePause(Option<bool>),
     Stop,
 }
 
@@ -52,7 +50,7 @@ fn main() {
     let (app_tx, app_rx) = app::channel::<AppHandleEvent>();
     let (mpv_tx, mpv_rx) = std::sync::mpsc::channel::<MpvEvent>();
 
-    let global = app::App::default();
+    let app = app::App::default();
 
     let mut win = Window::default()
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
@@ -64,7 +62,7 @@ fn main() {
         .center_of_parent();
 
     let menu_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
-    let _menu_win = menu_window(app_tx);
+    let _menu_win = menu_window();
     menu_group.end();
 
     let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
@@ -149,8 +147,12 @@ fn main() {
                     Stop => {
                         mpv.command("stop", &[]).ok();
                     }
-                    TogglePause => {
-                        mpv.set_property("pause", !is_pause).ok();
+                    TogglePause(pause) => {
+                        if let Some(p) = pause {
+                            mpv.set_property("pause", p).ok();
+                        } else {
+                            mpv.set_property("pause", !is_pause).ok();
+                        }
                     }
                 }
             }
@@ -159,7 +161,8 @@ fn main() {
 
     let mut last_seek_time = Instant::now();
     let throttle_duration = Duration::from_millis(150);
-    progress_bar.handle(enclose!((mpv_tx) move |w, ev| {
+    let hide_controls_timeout_handle: Rc<Cell<Option<TimeoutHandle>>> = Rc::new(Cell::new(None));
+    progress_bar.handle(enclose!((mpv_tx, app_tx) move |w, ev| {
         use fltk::enums::Event;
 
         let get_progress = |w: &Frame| {
@@ -186,11 +189,29 @@ fn main() {
                 mpv_tx.send(MpvEvent::DragEnd(get_progress(&w))).ok();
                 true
             }
+            Event::Move => {
+                if w.visible() {
+                    return false;
+                }
+
+                let Some(timeout_handle) = hide_controls_timeout_handle.get() else {
+                    return false;
+                };
+
+                app_tx.send(AppHandleEvent::ShowControlInFullScreen);
+                app::remove_timeout3(timeout_handle);
+                let handle = app::add_timeout3(1., enclose!((app_tx) move |_| {
+                    app_tx.send(AppHandleEvent::HideControlInFullScreen);
+                }));
+                hide_controls_timeout_handle.set(Some(handle));
+
+                true
+            }
             _ => false
         }
     }));
 
-    win.handle(enclose!((app_tx, mpv_tx) move |win, ev| {
+    win.handle(enclose!((app_tx, mpv_tx, progress_bar) move |_win, ev| {
         match ev {
             Event::KeyDown|Event::Shortcut => {
                 let key = app::event_key();
@@ -208,11 +229,22 @@ fn main() {
                         true
                     }
                     k if k == Key::from_char(' ') => {
-                        mpv_tx.send(MpvEvent::TogglePause).ok();
+                        mpv_tx.send(MpvEvent::TogglePause(None)).ok();
                         true
                     }
                     k if k == Key::from_char('f') => {
                         app_tx.send(AppHandleEvent::FullScreen(None));
+                        true
+                    }
+                    k if k == Key::from_char('n') => {
+                        if let Some(mark) = progress_bar.next_mark() {
+                            mpv_tx.send(MpvEvent::Seek(mark * 100.)).ok();
+                        }
+
+                        true
+                    }
+                    k if k == Key::from_char('m') => {
+                        progress_bar.add_mark_with_current_timepos();
                         true
                     }
                     _ => false
@@ -223,7 +255,7 @@ fn main() {
     }));
 
     let mut in_video = false;
-    while global.wait() {
+    while app.wait() {
         let Some(ev) = app_rx.recv() else {
             continue;
         };
@@ -300,7 +332,7 @@ fn mpv_window() -> (GlWindow, Window, FlatProgressBar) {
     (video_layer, controls, progress_bar)
 }
 
-fn menu_window(tx: fltk::app::Sender<AppHandleEvent>) -> Window {
+fn menu_window() -> Window {
     let mut win = Window::default()
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
         .with_label("MPV Linux Test");

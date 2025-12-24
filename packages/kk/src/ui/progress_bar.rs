@@ -1,10 +1,12 @@
-use std::{cell::{Cell, RefCell}, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use enclose::enclose;
 
 use fltk::{
-    app,
-    draw,
+    app, draw,
     enums::{Color, Event, FrameType},
     frame::Frame,
     prelude::{WidgetBase, WidgetExt},
@@ -12,6 +14,7 @@ use fltk::{
 
 type CustomHandler = dyn FnMut(Frame, Event) -> bool;
 
+#[derive(Clone)]
 pub struct FlatProgressBar {
     wid: Frame,
     val: Rc<Cell<f64>>,
@@ -26,7 +29,7 @@ impl FlatProgressBar {
         wid.set_frame(FrameType::FlatBox);
 
         let val = Rc::new(Cell::new(0.0)); // 0.0 ~ 1.0
-        let is_dragging =  Rc::new(Cell::new(false));
+        let is_dragging = Rc::new(Cell::new(false));
         let marked = Rc::new(RefCell::new(Vec::with_capacity(8)));
         let frame_handle: Rc<RefCell<Option<Box<CustomHandler>>>> = Rc::new(RefCell::new(None));
 
@@ -52,8 +55,9 @@ impl FlatProgressBar {
                     .iter()
                     .copied()
                     .for_each(|pos| {
+                        let pos_x = w.x() + (w.w() as f64 * pos) as i32;
                         draw::draw_rect_fill(
-                            w.x() + (w.w() as f64 * pos) as i32,
+                            pos_x,
                             w.y(),
                             1,
                             w.h(),
@@ -63,7 +67,7 @@ impl FlatProgressBar {
             }
         }));
 
-        wid.handle(enclose!((val, is_dragging, frame_handle, marked) {
+        wid.handle(enclose!((val, is_dragging, frame_handle) {
             move |w, ev| {
                 let inner_handle = match ev {
                     Event::Push | Event::Drag => {
@@ -96,17 +100,30 @@ impl FlatProgressBar {
             }
         }));
 
-        Self { wid, val, is_dragging, marked, frame_handle }
+        Self {
+            wid,
+            val,
+            is_dragging,
+            marked,
+            frame_handle,
+        }
     }
 
-    pub fn set_marked(&mut self, marked: &[f64]) {
+    pub fn set_marked(&self, marked: &[f64]) {
         let mut m = self.marked.borrow_mut();
         m.clear();
         m.extend_from_slice(marked);
     }
 
-    pub fn get_marked(&self) -> Rc<RefCell<Vec<f64>>> {
-        self.marked.clone()
+    #[inline]
+    pub fn add_mark_with_current_timepos(&self) {
+        self.add_mark(self.val.get());
+    }
+
+    pub fn add_mark(&self, mark: f64) {
+        let mut m = self.marked.borrow_mut();
+        m.push(mark);
+        m.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     }
 
     pub fn set_value(&mut self, value: f64) {
@@ -116,9 +133,19 @@ impl FlatProgressBar {
         }
     }
 
+    pub fn next_mark(&self) -> Option<f64> {
+        let m = self.marked.borrow();
+        if m.is_empty() {
+            return None;
+        }
+
+        let val = self.val.get();
+        m.iter().find(|m_pos| **m_pos > val).copied().or(Some(m[0]))
+    }
+
     pub fn handle<F>(&mut self, f: F)
     where
-        F: FnMut(Frame, Event) -> bool + 'static
+        F: FnMut(Frame, Event) -> bool + 'static,
     {
         *self.frame_handle.borrow_mut() = Some(Box::new(f));
     }

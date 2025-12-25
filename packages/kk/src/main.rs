@@ -1,44 +1,35 @@
 use enclose::enclose;
 use fltk::{
-    app::{self, TimeoutHandle}, draw,
-    enums::{Color, Cursor, Event, Key},
-    frame::Frame,
+    app, draw,
+    enums::{Color, Cursor, Event, Key, Mode},
     group::{Group, Wizard},
     prelude::{GroupExt, WidgetBase, WidgetExt, WindowExt},
     window::{GlWindow, Window},
 };
 use libmpv2::Mpv;
-use std::{
-    cell::Cell, env, rc::Rc, time::{Duration, Instant}
-};
-
-use crate::ui::progress_bar::FlatProgressBar;
-
-mod ui;
+use serde_json::json;
+use std::{cell::Cell, env, rc::Rc};
 
 const INIT_WIN_WIDTH: i32 = 600;
 const INIT_WIN_HEIGHT: i32 = 800;
-const CONTROLS_WIDTH: i32 = INIT_WIN_WIDTH;
-const CONTROLS_HEIGHT: i32 = 10;
 
 #[derive(Clone, Debug)]
 enum AppHandleEvent {
     TimePosUpdated(f64),
-    GoToVideo(String),
+    GoToVideo(String, Option<Vec<f64>>),
     GoToMenu,
     FullScreen(Option<bool>),
-    HideControlInFullScreen,
-    ShowControlInFullScreen,
+    SetCusor(Cursor),
 }
 
 #[derive(Clone, Debug)]
 enum MpvEvent {
-    Seek(f64),
-    DragStart,
-    DragEnd(f64),
     LoadFile(String),
-    TogglePause(Option<bool>),
+    SetMarker(Vec<f64>),
     Stop,
+    JumpNextMarker,
+    TogglePause,
+    TriggerMarkerSend,
 }
 
 fn main() {
@@ -50,6 +41,7 @@ fn main() {
     let (app_tx, app_rx) = app::channel::<AppHandleEvent>();
     let (mpv_tx, mpv_rx) = std::sync::mpsc::channel::<MpvEvent>();
 
+    app::set_visual(Mode::Rgb | Mode::Alpha).unwrap();
     let app = app::App::default();
 
     let mut win = Window::default()
@@ -66,7 +58,7 @@ fn main() {
     menu_group.end();
 
     let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
-    let (video_layer, mut controls, mut progress_bar) = mpv_window();
+    let video_layer = mpv_window();
     video_group.end();
 
     wizard.end();
@@ -78,14 +70,43 @@ fn main() {
         .unwrap();
     mpv_property(&mpv);
 
+    // load lua script
+    let temp_lua = tempfile::Builder::new()
+        .suffix(".lua")
+        .tempfile()
+        .expect("can't create tmpfile");
+    std::fs::write(temp_lua.path(), include_str!("../lua/marker.lua"))
+        .expect("write lua script failed");
+    let lua_path = temp_lua.path().to_str().unwrap();
+    mpv.command("load-script", &[lua_path])
+        .expect("load script failed");
+
     let _mpv_handle = std::thread::spawn(enclose!((app_tx) move || {
-        let mut is_pause = false;
         let mut total_dur: f64 = 0.;
         loop {
             if let Some(Ok(event)) = mpv.wait_event(0.1) {
                 use libmpv2::events::Event::*;
                 use libmpv2::events::PropertyData;
                 match event {
+                    ClientMessage(args) => {
+                        if args.is_empty() {
+                            return;
+                        }
+
+                        let event_name = args[0];
+                        match event_name {
+                            "ui_visibility_changed" => {
+                                let visible = args[1] == "visible";
+                                let cursor = if visible { Cursor::Default } else { Cursor::None };
+                                app_tx.send(AppHandleEvent::SetCusor(cursor));
+                            }
+                            "rust_add_marker" => {
+                                // todo
+                            }
+                            _ => {}
+                        }
+                        println!("{args:?}");
+                    },
                     PropertyChange {
                         name: event_name,
                         change: PropertyData::Double(val),
@@ -100,24 +121,6 @@ fn main() {
                             "duration" => {
                                 total_dur = val;
                             }
-                            "volume" => {
-
-                            }
-                            _ => ()
-                        }
-                    }
-                    PropertyChange {
-                        name: event_name,
-                        change: PropertyData::Flag(val),
-                        ..
-                    } => {
-                        match event_name {
-                            "pause" => {
-                                is_pause = val;
-                            }
-                            "core-idle" => {
-
-                            }
                             _ => ()
                         }
                     }
@@ -128,96 +131,39 @@ fn main() {
             if let Ok(evt) = mpv_rx.try_recv() {
                 use MpvEvent::*;
                 match evt {
-                    Seek(pct) => {
-                        let pct = (pct as i32).to_string();
-                        mpv.command("seek", &[&pct, "absolute-percent", "exact"]).ok();
-                    }
-                    DragStart => {
-                        mpv.set_property("pause", true).ok();
-                    }
-                    DragEnd(pct) => {
-                        let pct = (pct as i32).to_string();
-                        mpv.command("seek", &[&pct, "absolute-percent", "exact"]).ok();
-                        mpv.set_property("pause", false).ok();
-                    }
                     LoadFile(path) => {
                         mpv.command("loadfile", &[&path]).ok();
-                        is_pause = false;
                     }
                     Stop => {
                         mpv.command("stop", &[]).ok();
                     }
-                    TogglePause(pause) => {
-                        if let Some(p) = pause {
-                            mpv.set_property("pause", p).ok();
-                        } else {
-                            mpv.set_property("pause", !is_pause).ok();
-                        }
+                    SetMarker(m) => {
+                        let json_data = json!(m).to_string();
+                        mpv.command("script-message", &["update_markers", &json_data]).unwrap();
+                    }
+                    JumpNextMarker => {
+                        mpv.command("script-message", &["jump_next_marker"]).ok();
+                    }
+                    TogglePause => {
+                        mpv.command("cycle", &["pause"]).ok();
+                    }
+                    TriggerMarkerSend => {
+                        mpv.command("script-message", &["trigger_marker_send"]).ok();
                     }
                 }
             }
         }
     }));
 
-    let mut last_seek_time = Instant::now();
-    let throttle_duration = Duration::from_millis(150);
-    let hide_controls_timeout_handle: Rc<Cell<Option<TimeoutHandle>>> = Rc::new(Cell::new(None));
-    progress_bar.handle(enclose!((mpv_tx, app_tx) move |w, ev| {
-        use fltk::enums::Event;
-
-        let get_progress = |w: &Frame| {
-            let mouse_x = app::event_x() - w.x();
-            let pct = mouse_x as f64 / w.w() as f64;
-            pct * 100.
-        };
-
-        match ev {
-            Event::Push => {
-                mpv_tx.send(MpvEvent::DragStart).ok();
-                true
-            }
-            Event::Drag => {
-                if last_seek_time.elapsed() >= throttle_duration {
-                    mpv_tx.send(MpvEvent::Seek(get_progress(&w))).ok();
-                    last_seek_time = Instant::now();
-                    true
-                } else {
-                    false
-                }
-            }
-            Event::Released => {
-                mpv_tx.send(MpvEvent::DragEnd(get_progress(&w))).ok();
-                true
-            }
-            Event::Move => {
-                if w.visible() {
-                    return false;
-                }
-
-                let Some(timeout_handle) = hide_controls_timeout_handle.get() else {
-                    return false;
-                };
-
-                app_tx.send(AppHandleEvent::ShowControlInFullScreen);
-                app::remove_timeout3(timeout_handle);
-                let handle = app::add_timeout3(1., enclose!((app_tx) move |_| {
-                    app_tx.send(AppHandleEvent::HideControlInFullScreen);
-                }));
-                hide_controls_timeout_handle.set(Some(handle));
-
-                true
-            }
-            _ => false
-        }
-    }));
-
-    win.handle(enclose!((app_tx, mpv_tx, progress_bar) move |_win, ev| {
+    let in_video = Rc::new(Cell::new(false));
+    win.handle(enclose!((app_tx, mpv_tx, in_video) move |_win, ev| {
         match ev {
             Event::KeyDown|Event::Shortcut => {
                 let key = app::event_key();
                 return match key {
                     Key::Enter => {
-                        app_tx.send(AppHandleEvent::GoToVideo("/home/ckaznable/tmp/a.mp4".to_string()));
+                        let marker: Vec<f64> = vec![10., 65.];
+                        app_tx.send(AppHandleEvent::GoToVideo("/home/ckaznable/tmp/a.mp4".to_string(), Some(marker)));
                         true
                     }
                     Key::Escape => {
@@ -228,23 +174,20 @@ fn main() {
                         app_tx.send(AppHandleEvent::GoToMenu);
                         true
                     }
-                    k if k == Key::from_char(' ') => {
-                        mpv_tx.send(MpvEvent::TogglePause(None)).ok();
-                        true
-                    }
                     k if k == Key::from_char('f') => {
                         app_tx.send(AppHandleEvent::FullScreen(None));
                         true
                     }
-                    k if k == Key::from_char('n') => {
-                        if let Some(mark) = progress_bar.next_mark() {
-                            mpv_tx.send(MpvEvent::Seek(mark * 100.)).ok();
-                        }
-
+                    k if k == Key::from_char('n') && in_video.get() => {
+                        mpv_tx.send(MpvEvent::JumpNextMarker).ok();
                         true
                     }
-                    k if k == Key::from_char('m') => {
-                        progress_bar.add_mark_with_current_timepos();
+                    k if k == Key::from_char('m') && in_video.get() => {
+                        mpv_tx.send(MpvEvent::TriggerMarkerSend).ok();
+                        true
+                    }
+                    k if k == Key::from_char(' ') && in_video.get() => {
+                        mpv_tx.send(MpvEvent::TogglePause).ok();
                         true
                     }
                     _ => false
@@ -254,7 +197,6 @@ fn main() {
         }
     }));
 
-    let mut in_video = false;
     while app.wait() {
         let Some(ev) = app_rx.recv() else {
             continue;
@@ -262,64 +204,44 @@ fn main() {
 
         use AppHandleEvent::*;
         match ev {
-            TimePosUpdated(new_time) => {
-                progress_bar.set_value(new_time);
-            }
-            GoToVideo(p) => {
-                in_video = true;
+            TimePosUpdated(_new_time) => {}
+            GoToVideo(p, m) => {
+                in_video.set(true);
                 wizard.set_current_widget(&video_group);
                 mpv_tx.send(MpvEvent::LoadFile(p)).ok();
+                if let Some(m) = m {
+                    mpv_tx.send(MpvEvent::SetMarker(m)).ok();
+                }
             }
             GoToMenu => {
                 wizard.set_current_widget(&menu_group);
+                in_video.set(false);
                 mpv_tx.send(MpvEvent::Stop).ok();
             }
             FullScreen(v) => {
-                if !in_video {
+                if !in_video.get() {
                     continue;
                 }
 
                 let is_fullscreen = v.unwrap_or(!win.fullscreen_active());
+                win.fullscreen(is_fullscreen);
+
                 if is_fullscreen {
-                    controls.hide();
                     win.set_cursor(Cursor::None);
                 } else {
-                    controls.show();
                     win.set_cursor(Cursor::Default);
                 }
-                win.fullscreen(is_fullscreen);
             }
-            HideControlInFullScreen => {
-                if win.fullscreen_active() {
-                    controls.hide();
-                    win.set_cursor(Cursor::None);
-                }
-            }
-            ShowControlInFullScreen => {
-                if win.fullscreen_active() {
-                    controls.show();
-                    win.set_cursor(Cursor::Default);
+            SetCusor(cursor) => {
+                if in_video.get() {
+                    win.set_cursor(cursor);
                 }
             }
         }
     }
 }
 
-fn mpv_controls() -> (Window, FlatProgressBar) {
-    let mut controls = Window::default()
-        .with_pos(0, INIT_WIN_HEIGHT - CONTROLS_HEIGHT)
-        .with_size(CONTROLS_WIDTH, CONTROLS_HEIGHT)
-        .with_label("");
-    controls.make_resizable(true);
-    controls.set_color(Color::from_rgba(0, 0, 0, 150));
-    controls.set_border(false);
-
-    let progress_bar = FlatProgressBar::new(0, 0, INIT_WIN_WIDTH, CONTROLS_HEIGHT);
-    controls.end();
-    (controls, progress_bar)
-}
-
-fn mpv_window() -> (GlWindow, Window, FlatProgressBar) {
+fn mpv_window() -> GlWindow {
     let mut video_layer = GlWindow::default()
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
         .with_label("");
@@ -327,9 +249,7 @@ fn mpv_window() -> (GlWindow, Window, FlatProgressBar) {
     video_layer.set_border(false);
     video_layer.end();
 
-    let (controls, progress_bar) = mpv_controls();
-
-    (video_layer, controls, progress_bar)
+    video_layer
 }
 
 fn menu_window() -> Window {
@@ -354,14 +274,10 @@ fn mpv_property(mpv: &Mpv) {
     {
         mpv.set_property("gpu-api", "opengl").unwrap();
         mpv.set_property("gpu-context", "x11egl").unwrap();
-        mpv.set_property("vo", "x11").unwrap();
     }
 
     mpv.set_property("hwdec", "auto").unwrap();
 
     mpv.observe_property("time-pos", Format::Double, 0).unwrap();
     mpv.observe_property("duration", Format::Double, 1).unwrap();
-    mpv.observe_property("pause", Format::Flag, 2).unwrap();
-    mpv.observe_property("volume", Format::Double, 3).unwrap();
-    mpv.observe_property("core-idle", Format::Flag, 4).unwrap();
 }

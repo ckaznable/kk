@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::db::SimpleJsonDatabase;
+
 pub mod db;
 pub mod util;
 
@@ -27,3 +29,6 @@ pub struct Actor {
     pub thumb: Option<String>,
 }
 
+pub fn init( ) -> SimpleJsonDatabase {
+    SimpleJsonDatabase::default()
+}

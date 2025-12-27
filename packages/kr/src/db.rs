@@ -33,7 +33,7 @@ pub struct IndexCacheTable {
 impl Default for IndexCacheTable {
     fn default() -> Self {
         Self {
-            idx: Default::default(),
+            idx: None,
             dirty: true
         }
     }
@@ -55,17 +55,25 @@ pub struct SimpleJsonDatabase {
     order_by_added_time_index: IndexCacheTable,
 }
 
-impl SimpleJsonDatabase {
-    pub fn new(path: PathBuf) -> Result<Self> {
-        let config = Self::load(&path)?;
+impl Default for SimpleJsonDatabase {
+    fn default() -> Self {
+        let config = Config::default();
         let index_ref = (0..config.movies.len() as u32).collect();
 
-        Ok(Self {
+        Self {
             config,
             index_ref,
             order_by_fav_index: IndexCacheTable::default(),
             order_by_added_time_index: IndexCacheTable::default(),
-        })
+        }
+    }
+}
+
+impl SimpleJsonDatabase {
+    pub fn load_config(&mut self, p: &Path) -> Result<()> {
+        self.config = Self::load(p)?;
+        self.index_ref = (0..self.config.movies.len() as u32).collect();
+        Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Config> {

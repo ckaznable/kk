@@ -199,6 +199,7 @@ dependencies = [
  "enclose",
  "fltk",
  "fltk-theme",
+ "kr",
  "libmpv2",
  "serde",
  "serde_json",

@@ -1,14 +1,23 @@
 use enclose::enclose;
 use fltk::{
-    app, draw,
-    enums::{Color, Cursor, Event, Key, Mode},
+    app,
+    enums::{Cursor, Event, Key, Mode},
     group::{Group, Wizard},
     prelude::{GroupExt, WidgetBase, WidgetExt, WindowExt},
     window::{GlWindow, Window},
 };
 use libmpv2::Mpv;
 use serde_json::json;
-use std::{cell::Cell, env, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    env,
+    path::PathBuf,
+    rc::Rc,
+};
+
+use crate::ui::browse::BrowseMenu;
+
+mod ui;
 
 const INIT_WIN_WIDTH: i32 = 600;
 const INIT_WIN_HEIGHT: i32 = 800;
@@ -38,6 +47,10 @@ fn main() {
         env::set_var("FLTK_BACKEND", "x11");
     }
 
+    let mut db = kr::init();
+    db.load_config(&PathBuf::from("/home/ckaznable/tmp")).ok();
+    let db = Rc::new(RefCell::new(db));
+
     let (app_tx, app_rx) = app::channel::<AppHandleEvent>();
     let (mpv_tx, mpv_rx) = std::sync::mpsc::channel::<MpvEvent>();
 
@@ -53,9 +66,21 @@ fn main() {
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
         .center_of_parent();
 
-    let menu_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
-    let _menu_win = menu_window();
-    menu_group.end();
+    let mut menu = BrowseMenu::new(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
+
+    menu.set_item(
+        db.borrow_mut()
+            .order_by_added_time()
+            .flat_map(|item| {
+                Some((
+                    item.path.parent()?.join(item.movie.thumb.clone()?),
+                    item.movie.title.clone(),
+                ))
+            })
+            .collect(),
+    );
+    menu.set_page(0);
+    menu.draw();
 
     let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
     let video_layer = mpv_window();
@@ -214,7 +239,7 @@ fn main() {
                 }
             }
             GoToMenu => {
-                wizard.set_current_widget(&menu_group);
+                wizard.set_current_widget(&menu.g);
                 in_video.set(false);
                 mpv_tx.send(MpvEvent::Stop).ok();
             }
@@ -250,20 +275,6 @@ fn mpv_window() -> GlWindow {
     video_layer.end();
 
     video_layer
-}
-
-fn menu_window() -> Window {
-    let mut win = Window::default()
-        .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
-        .with_label("MPV Linux Test");
-    win.make_resizable(true);
-
-    win.draw(enclose!(() move|w| {
-        draw::draw_rect_fill(w.x(), w.y(), w.w(), w.h(), Color::from_rgb(70, 55, 30));
-    }));
-
-    win.end();
-    win
 }
 
 #[inline]

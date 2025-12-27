@@ -14,7 +14,7 @@ use crate::ui::reflow_widgets;
 
 const CONTAINER_MARGIN: i32 = 10;
 
-const MENU_ITEM_HEIGHT: i32 = 320;
+const MENU_ITEM_HEIGHT: i32 = 280;
 const MENU_ITEM_WIDTH: i32 = 350;
 
 const MENU_IMG_HEIGHT: i32 = 220;
@@ -46,7 +46,7 @@ impl MenuItem {
 
             draw::set_draw_color(Color::White);
             draw::set_font(Font::Helvetica, 14);
-            let txt_y = img_y + MENU_IMG_HEIGHT + 5;
+            let txt_y = img_y + MENU_IMG_HEIGHT + 5 - img_y_fix;
             let max_w = (MENU_ITEM_WIDTH - 4) as f64;
             let line_height = 18;
 
@@ -113,6 +113,7 @@ impl MenuItem {
     }
 }
 
+#[derive(Clone)]
 pub struct BrowseMenu {
     pub g: Group,
     items: Rc<RefCell<Vec<RenderItem>>>,
@@ -122,7 +123,7 @@ pub struct BrowseMenu {
 impl BrowseMenu {
     pub fn new(width: i32, height: i32) -> Self {
         let items = Rc::new(RefCell::new(vec![]));
-        let page = Rc::new(Cell::new(0));
+        let page = Rc::new(Cell::new(1));
 
         let mut g = Group::default().with_size(width, height).with_pos(0, 0);
 
@@ -152,6 +153,7 @@ impl BrowseMenu {
 
     pub fn draw_items(g: &mut Group, items: &[RenderItem], page: usize) {
         let page_size = Self::page_size(g);
+        let page = page.min(items.len() / page_size + 1);
 
         g.clear();
 
@@ -180,7 +182,19 @@ impl BrowseMenu {
     }
 
     pub fn set_page(&mut self, page: usize) {
+        let page_size = Self::page_size(&self.g);
+        let page = page.min(self.items.borrow().len() / page_size + 1).max(1);
         self.page.set(page);
+    }
+
+    pub fn next_page(&mut self) {
+        self.set_page(self.page.get() + 1);
+        self.draw();
+    }
+
+    pub fn prev_page(&mut self) {
+        self.set_page(self.page.get().saturating_sub(1).max(1));
+        self.draw();
     }
 
     pub fn page_size(g: &Group) -> usize {

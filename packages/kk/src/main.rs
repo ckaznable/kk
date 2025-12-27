@@ -79,7 +79,6 @@ fn main() {
             })
             .collect(),
     );
-    menu.set_page(0);
     menu.draw();
 
     let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
@@ -181,7 +180,7 @@ fn main() {
     }));
 
     let in_video = Rc::new(Cell::new(false));
-    win.handle(enclose!((app_tx, mpv_tx, in_video) move |_win, ev| {
+    win.handle(enclose!((app_tx, mpv_tx, in_video, mut menu) move |_win, ev| {
         match ev {
             Event::KeyDown|Event::Shortcut => {
                 let key = app::event_key();
@@ -203,8 +202,16 @@ fn main() {
                         app_tx.send(AppHandleEvent::FullScreen(None));
                         true
                     }
-                    k if k == Key::from_char('n') && in_video.get() => {
-                        mpv_tx.send(MpvEvent::JumpNextMarker).ok();
+                    k if k == Key::from_char('n') => {
+                        if in_video.get() {
+                            mpv_tx.send(MpvEvent::JumpNextMarker).ok();
+                        } else {
+                            menu.next_page();
+                        }
+                        true
+                    }
+                    k if k == Key::from_char('p') && !in_video.get() => {
+                        menu.prev_page();
                         true
                     }
                     k if k == Key::from_char('m') && in_video.get() => {

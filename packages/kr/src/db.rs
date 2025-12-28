@@ -149,7 +149,7 @@ impl SimpleJsonDatabase {
         }
     }
 
-    pub fn order_by_fav<'a>(&'a mut self) -> DatabaseSlice<'a> {
+    pub fn filter_by_fav<'a>(&'a mut self) -> DatabaseSlice<'a> {
         if !self.order_by_fav_index.dirty && let Some(ref idx) = self.order_by_fav_index.idx {
             return DatabaseSlice::new(&self.config.movies, idx);
         }

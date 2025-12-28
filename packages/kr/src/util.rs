@@ -41,45 +41,64 @@ pub fn find_new_movie_nfo(
     });
 
     for entry in entries {
-        let path = entry.path();
-
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-
-        let Ok(dir_mtime) = metadata.modified() else {
-            continue;
-        };
-
-        if dir_mtime <= last_scan_time {
-            continue;
-        }
-
-        let file_type = metadata.file_type();
-        if file_type.is_file() && is_nfo_file(known_files, &path) {
-            new_files.push(path);
-            continue;
-        }
-
-        if file_type.is_dir() && let Ok(sub_entries) = fs::read_dir(&path) {
-            let sub_entries = sub_entries.into_iter();
-            for sub_entry in sub_entries {
-                let Ok(sub_entry) = sub_entry else {
-                    continue;
-                };
-
-                let sub_path = sub_entry.path();
-                if sub_path.is_file() && is_nfo_file(known_files, &sub_path) {
-                    new_files.push(sub_path);
-                }
-            }
-        }
+        get_nfo_files(&mut new_files, entry, known_files, last_scan_time);
     }
 
     Ok(new_files)
 }
 
-pub fn is_nfo_file(known_files: &AHashSet<PathBuf>, path: &Path) -> bool {
+fn get_nfo_files(
+    buf: &mut Vec<PathBuf>,
+    entry: DirEntry,
+    known_files: &AHashSet<PathBuf>,
+    last_scan_time: SystemTime,
+) {
+    let path = entry.path();
+
+    let Ok(metadata) = entry.metadata() else {
+        return;
+    };
+
+    let Ok(dir_mtime) = metadata.modified() else {
+        return;
+    };
+
+    if dir_mtime <= last_scan_time {
+        return;
+    }
+
+    let Some(p) = path.parent() else {
+        return;
+    };
+
+    let Some(dir_name) = p.file_name() else {
+        return;
+    };
+
+    let Some(file_name) = path.file_name() else {
+        return;
+    };
+
+    let dir_name = dir_name.to_string_lossy();
+    let file_name = file_name.to_string_lossy();
+
+    let file_type = metadata.file_type();
+    if file_type.is_file()
+        && file_name.starts_with(dir_name.as_ref())
+        && is_nfo_file(known_files, &path)
+    {
+        buf.push(path);
+    } else if file_type.is_dir()
+        && let Ok(sub_entries) = fs::read_dir(&path)
+    {
+        for sub_entry in sub_entries.into_iter().flatten() {
+            get_nfo_files(buf, sub_entry, known_files, last_scan_time);
+        }
+    }
+}
+
+#[inline]
+fn is_nfo_file(known_files: &AHashSet<PathBuf>, path: &Path) -> bool {
     path.extension()
         .map(|ext| ext == "nfo" && !known_files.contains(path))
         .unwrap_or(false)

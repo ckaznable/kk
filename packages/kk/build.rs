@@ -14,7 +14,7 @@ fn main() {
     executable_path.pop();
     executable_path.pop();
 
-    let src = format!("./lib/{}", dll_name);
+    let src = format!("../../lib/{}", dll_name);
     let dest = executable_path.join(dll_name);
 
     if std::path::Path::new(&src).exists() {

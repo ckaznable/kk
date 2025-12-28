@@ -186,8 +186,7 @@ fn main() {
                 let key = app::event_key();
                 return match key {
                     Key::Enter => {
-                        let marker: Vec<f64> = vec![10., 65.];
-                        app_tx.send(AppHandleEvent::GoToVideo("/home/ckaznable/tmp/a.mp4".to_string(), Some(marker)));
+                        app_tx.send(AppHandleEvent::GoToVideo("/home/ckaznable/tmp/a.mp4".to_string(), None));
                         true
                     }
                     Key::Escape => {

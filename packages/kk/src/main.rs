@@ -1,7 +1,7 @@
 use enclose::enclose;
 use fltk::{
     app,
-    enums::{Cursor, Event, Key, Mode},
+    enums::{Color, Cursor, Event, Key},
     group::{Group, Wizard},
     prelude::{GroupExt, WidgetBase, WidgetExt, WindowExt},
     window::{GlWindow, Window},
@@ -19,8 +19,8 @@ use crate::ui::browse::BrowseMenu;
 
 mod ui;
 
-const INIT_WIN_WIDTH: i32 = 600;
-const INIT_WIN_HEIGHT: i32 = 800;
+const INIT_WIN_WIDTH: i32 = 1280;
+const INIT_WIN_HEIGHT: i32 = 720;
 
 #[derive(Clone, Debug)]
 enum AppHandleEvent {
@@ -54,7 +54,6 @@ fn main() {
     let (app_tx, app_rx) = app::channel::<AppHandleEvent>();
     let (mpv_tx, mpv_rx) = std::sync::mpsc::channel::<MpvEvent>();
 
-    app::set_visual(Mode::Rgb | Mode::Alpha).unwrap();
     let app = app::App::default();
 
     let mut win = Window::default()
@@ -318,6 +317,7 @@ fn mpv_window() -> GlWindow {
     let mut video_layer = GlWindow::default()
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
         .with_label("");
+    video_layer.set_color(Color::Black);
     video_layer.make_resizable(true);
     video_layer.set_border(false);
     video_layer.end();

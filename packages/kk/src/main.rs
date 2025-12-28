@@ -191,7 +191,18 @@ fn main() {
                         true
                     }
                     Key::Escape => {
-                        app_tx.send(AppHandleEvent::FullScreen(Some(false)));
+                        if in_video.get() {
+                            app_tx.send(AppHandleEvent::FullScreen(Some(false)));
+                        } else {
+                            menu.reset_symbol();
+                            menu.draw();
+                        }
+
+                        true
+                    }
+                    Key::BackSpace => {
+                        menu.pop_symbol();
+                        menu.draw();
                         true
                     }
                     k if k == Key::from_char('q') => {
@@ -206,16 +217,47 @@ fn main() {
                         if in_video.get() {
                             mpv_tx.send(MpvEvent::JumpNextMarker).ok();
                         } else {
-                            menu.next_page();
+                            todo!()
                         }
                         true
                     }
-                    k if k == Key::from_char('p') && !in_video.get() => {
+                    k if k == Key::from_char('h') && !in_video.get() => {
                         menu.prev_page();
+                        menu.draw();
+                        true
+                    }
+                    k if k == Key::from_char('l') && !in_video.get() => {
+                        menu.next_page();
+                        menu.draw();
                         true
                     }
                     k if k == Key::from_char('m') && in_video.get() => {
                         mpv_tx.send(MpvEvent::TriggerMarkerSend).ok();
+                        true
+                    }
+                    k if k == Key::from_char('u') && !in_video.get() => {
+                        menu.push_symbol('u');
+                        menu.draw();
+                        true
+                    }
+                    k if k == Key::from_char('i') && !in_video.get() => {
+                        menu.push_symbol('i');
+                        menu.draw();
+                        true
+                    }
+                    k if k == Key::from_char('o') && !in_video.get() => {
+                        menu.push_symbol('o');
+                        menu.draw();
+                        true
+                    }
+                    k if k == Key::from_char('p') && !in_video.get() => {
+                        menu.push_symbol('p');
+                        menu.draw();
+                        true
+                    }
+                    k if k == Key::from_char('0') && !in_video.get() => {
+                        menu.reset_symbol();
+                        menu.draw();
                         true
                     }
                     k if k == Key::from_char(' ') && in_video.get() => {

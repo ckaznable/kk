@@ -1,4 +1,5 @@
 use enclose::enclose;
+use itertools::Itertools;
 use std::{cell::{Cell, RefCell}, path::{Path, PathBuf}, rc::Rc};
 
 use fltk::{
@@ -14,7 +15,7 @@ use crate::ui::reflow_widgets;
 
 const CONTAINER_MARGIN: i32 = 10;
 
-const MENU_ITEM_HEIGHT: i32 = 280;
+const MENU_ITEM_HEIGHT: i32 = 300;
 const MENU_ITEM_WIDTH: i32 = 350;
 
 const MENU_IMG_HEIGHT: i32 = 220;
@@ -28,7 +29,7 @@ pub struct MenuItem;
 
 impl MenuItem {
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(img_path: &Path, content: &str) -> anyhow::Result<Group> {
+    pub fn new(img_path: &Path, content: &str, symbol: String) -> anyhow::Result<Group> {
         let mut img = SharedImage::load(img_path)?;
         img.scale(MENU_IMG_WIDTH, MENU_IMG_HEIGHT, true, true);
 
@@ -92,7 +93,7 @@ impl MenuItem {
                     txt_y,
                     MENU_ITEM_WIDTH,
                     line_height,
-                    Align::Center,
+                    Align::Left,
                 );
             }
 
@@ -103,9 +104,18 @@ impl MenuItem {
                     txt_y + line_height,
                     MENU_ITEM_WIDTH,
                     line_height,
-                    Align::Center,
+                    Align::Left,
                 );
             }
+
+            draw::draw_text2(
+                &format!("({symbol})"),
+                w.x(),
+                txt_y + line_height * 2,
+                MENU_ITEM_WIDTH,
+                line_height,
+                Align::Center,
+            );
         });
         item.end();
 
@@ -118,12 +128,26 @@ pub struct BrowseMenu {
     pub g: Group,
     items: Rc<RefCell<Vec<RenderItem>>>,
     page: Rc<Cell<usize>>,
+    symbols: Rc<Vec<String>>,
+    symbol: Rc<RefCell<String>>,
 }
 
 impl BrowseMenu {
     pub fn new(width: i32, height: i32) -> Self {
         let items = Rc::new(RefCell::new(vec![]));
         let page = Rc::new(Cell::new(1));
+
+        let symbols_chars = "uiop";
+        let n = symbols_chars.len();
+        let symbols: Vec<String> = (1..=n)
+            .flat_map(|len| {
+                symbols_chars.chars()
+                    .permutations(len)
+                    .map(|chars| chars.into_iter().collect::<String>())
+            })
+            .collect();
+        let symbols = Rc::new(symbols);
+        let symbol = Rc::new(RefCell::new(String::from("")));
 
         let mut g = Group::default().with_size(width, height).with_pos(0, 0);
 
@@ -139,19 +163,19 @@ impl BrowseMenu {
             w.draw_children();
         });
 
-        g.resize_callback(enclose!((items, page) move |w, _x, _y, _width, _height| {
-            Self::draw_items(w, &items.borrow(), page.get());
+        g.resize_callback(enclose!((items, page, symbols, symbol) move |w, _x, _y, _width, _height| {
+            Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow());
         }));
 
         g.show();
-        Self { g, items, page }
+        Self { g, items, page, symbols, symbol }
     }
 
     pub fn draw(&mut self) {
-        Self::draw_items(&mut self.g, &self.items.borrow(), self.page.get());
+        Self::draw_items(&mut self.g, &self.items.borrow(), self.page.get(), &self.symbols,&self.symbol.borrow());
     }
 
-    pub fn draw_items(g: &mut Group, items: &[RenderItem], page: usize) {
+    pub fn draw_items(g: &mut Group, items: &[RenderItem], page: usize, symbols: &[String], s: &str) {
         let page_size = Self::page_size(g);
         let page = page.min(items.len() / page_size + 1);
 
@@ -162,8 +186,22 @@ impl BrowseMenu {
             .iter()
             .skip(page_size * (page.saturating_sub(1)))
             .take(page_size)
-            .for_each(|(p, c)| {
-                MenuItem::new(p, c).ok();
+            .enumerate()
+            .filter_map(|(i, (p, c))| {
+                let symbol = if i > symbols.len() {
+                    &symbols[symbols.len() % i]
+                } else {
+                    &symbols[i]
+                };
+
+                if !s.is_empty() && !symbol.starts_with(s) {
+                    return None;
+                }
+
+                Some((p, c, symbol.clone()))
+            })
+            .for_each(|(p, c, s)| {
+                MenuItem::new(p, c, s).ok();
             });
         g.end();
 
@@ -187,14 +225,24 @@ impl BrowseMenu {
         self.page.set(page);
     }
 
+    pub fn push_symbol(&self, ch: char) {
+        self.symbol.borrow_mut().push(ch);
+    }
+
+    pub fn pop_symbol(&self) {
+        self.symbol.borrow_mut().pop();
+    }
+
+    pub fn reset_symbol(&self) {
+        self.symbol.borrow_mut().clear();
+    }
+
     pub fn next_page(&mut self) {
         self.set_page(self.page.get() + 1);
-        self.draw();
     }
 
     pub fn prev_page(&mut self) {
         self.set_page(self.page.get().saturating_sub(1).max(1));
-        self.draw();
     }
 
     pub fn page_size(g: &Group) -> usize {

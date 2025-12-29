@@ -10,7 +10,6 @@ use libmpv2::Mpv;
 use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
-    env,
     path::PathBuf,
     rc::Rc,
 };
@@ -44,6 +43,7 @@ enum MpvEvent {
 fn main() {
     #[cfg(target_os = "linux")]
     unsafe {
+        use std::env;
         env::set_var("FLTK_BACKEND", "x11");
     }
 
@@ -80,17 +80,20 @@ fn main() {
     );
     menu.draw();
 
-    let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
+    let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT).with_pos(0, 0);
     let video_layer = mpv_window();
     video_group.end();
 
     wizard.end();
+    wizard.set_current_widget(&video_group);
+
     win.end();
     win.show();
 
+    let wid = video_layer.raw_handle() as i64;
+
     let mut mpv = Mpv::new().expect("Main MPV init failed");
-    mpv.set_property("wid", video_layer.raw_handle() as i64)
-        .unwrap();
+    mpv.set_property("wid", wid).unwrap();
     mpv_property(&mpv);
 
     // load lua script

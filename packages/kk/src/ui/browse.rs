@@ -167,7 +167,6 @@ impl BrowseMenu {
             Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow());
         }));
 
-        g.show();
         Self { g, items, page, symbols, symbol }
     }
 

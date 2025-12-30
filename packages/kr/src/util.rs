@@ -19,20 +19,14 @@ pub fn find_new_movie_nfo(
     // hdd friendly
     entries.sort_by_key(|e| {
         e.metadata()
-            .map(|m| {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    m.file_index().unwrap_or(0)
-                }
-
+            .map(|_m| {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::MetadataExt;
-                    m.ino()
+                    _m.ino()
                 }
 
-                #[cfg(not(any(unix, windows)))]
+                #[cfg(not(any(unix)))]
                 {
                     0
                 }

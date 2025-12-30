@@ -38,6 +38,8 @@ enum MpvEvent {
     JumpNextMarker,
     TogglePause,
     TriggerMarkerSend,
+    MouseMove(i32, i32),
+    MouseClick(i32, i32),
 }
 
 fn main() {
@@ -176,14 +178,47 @@ fn main() {
                     TriggerMarkerSend => {
                         mpv.command("script-message", &["trigger_marker_send"]).ok();
                     }
+                    MouseMove(x, y) => {
+                        #[cfg(target_os = "windows")]
+                        mpv.command("mouse", &[&x.to_string(), &y.to_string()]).ok();
+                    }
+                    MouseClick(x, y) => {
+                        #[cfg(target_os = "windows")]
+                        mpv.command("mouse", &[&x.to_string(), &y.to_string(), "0", "single"]).ok();
+                    }
                 }
             }
         }
     }));
 
     let in_video = Rc::new(Cell::new(false));
-    win.handle(enclose!((app_tx, mpv_tx, in_video, mut menu) move |_win, ev| {
+    let mut mouse_event_throttle = 0u8;
+    win.handle(enclose!((app_tx, mpv_tx, in_video, mut menu) move |win, ev| {
         match ev {
+            Event::Move => {
+                mouse_event_throttle = if mouse_event_throttle > 3 {
+                    0
+                } else {
+                    mouse_event_throttle + 1
+                };
+
+                if in_video.get() && mouse_event_throttle % 3 == 0 {
+                    let (x, y) = app::event_coords();
+                    mpv_tx.send(MpvEvent::MouseMove(x, y)).ok();
+                    win.set_cursor(Cursor::Default);
+                    return true;
+                }
+
+                false
+            },
+            Event::Push => {
+                if in_video.get(){
+                    let (x, y) = app::event_coords();
+                    mpv_tx.send(MpvEvent::MouseClick(x, y)).ok();
+                    return true;
+                }
+                false
+            }
             Event::KeyDown|Event::Shortcut => {
                 let key = app::event_key();
                 return match key {

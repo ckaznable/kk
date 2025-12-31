@@ -9,6 +9,7 @@ use fltk::{
 use libmpv2::Mpv;
 use serde_json::json;
 use std::{
+    env,
     cell::{Cell, RefCell},
     path::PathBuf,
     rc::Rc,
@@ -45,12 +46,14 @@ enum MpvEvent {
 fn main() {
     #[cfg(target_os = "linux")]
     unsafe {
-        use std::env;
         env::set_var("FLTK_BACKEND", "x11");
     }
 
+    let search_path = env::var("KK_SEARCH_PATH").expect("KK_SEARCH_PATH env variable is required");
+    let search_path = PathBuf::from(search_path);
+
     let mut db = kr::init();
-    db.load_config(&PathBuf::from("/home/ckaznable/tmp")).ok();
+    db.load_config(&search_path).ok();
     let db = Rc::new(RefCell::new(db));
 
     let (app_tx, app_rx) = app::channel::<AppHandleEvent>();
@@ -223,7 +226,30 @@ fn main() {
                 let key = app::event_key();
                 return match key {
                     Key::Enter => {
-                        app_tx.send(AppHandleEvent::GoToVideo("/home/ckaznable/tmp/a.mp4".to_string(), None));
+                        if let Some(p) = menu.page_first_item_path() {
+                            let parent = p.parent().unwrap();
+                            let filename = parent.file_name().unwrap().to_str().unwrap();
+                            let filepath = std::fs::read_dir(parent)
+                                .unwrap()
+                                .into_iter()
+                                .filter_map(|e| e.ok())
+                                .find(|e| {
+                                    let name = e.file_name().to_string_lossy().to_string();
+                                    if !name.starts_with(&filename) {
+                                        return false;
+                                    }
+
+                                    if let Some(ext) = e.path().extension() {
+                                        ext != "nfo"
+                                    } else {
+                                        false
+                                    }
+                                });
+
+                            if let Some(filepath) = filepath {
+                                app_tx.send(AppHandleEvent::GoToVideo(filepath.path().to_string_lossy().to_string(), None));
+                            }
+                        }
                         true
                     }
                     Key::Escape => {
@@ -241,7 +267,7 @@ fn main() {
                         menu.draw();
                         true
                     }
-                    k if k == Key::from_char('q') => {
+                    k if k == Key::from_char('q') || k == Key::from_char('o') => {
                         app_tx.send(AppHandleEvent::GoToMenu);
                         true
                     }

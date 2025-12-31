@@ -130,6 +130,7 @@ pub struct BrowseMenu {
     page: Rc<Cell<usize>>,
     symbols: Rc<Vec<String>>,
     symbol: Rc<RefCell<String>>,
+    page_path_list: Rc<RefCell<Vec<PathBuf>>>
 }
 
 impl BrowseMenu {
@@ -148,6 +149,7 @@ impl BrowseMenu {
             .collect();
         let symbols = Rc::new(symbols);
         let symbol = Rc::new(RefCell::new(String::from("")));
+        let page_path_list = Rc::new(RefCell::new(vec![]));
 
         let mut g = Group::default().with_size(width, height).with_pos(0, 0);
 
@@ -163,25 +165,25 @@ impl BrowseMenu {
             w.draw_children();
         });
 
-        g.resize_callback(enclose!((items, page, symbols, symbol) move |w, _x, _y, _width, _height| {
-            Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow());
+        g.resize_callback(enclose!((items, page, symbols, symbol, page_path_list) move |w, _x, _y, _width, _height| {
+            *page_path_list.borrow_mut() = Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow());
         }));
 
-        Self { g, items, page, symbols, symbol }
+        Self { g, items, page, symbols, symbol, page_path_list }
     }
 
     pub fn draw(&mut self) {
-        Self::draw_items(&mut self.g, &self.items.borrow(), self.page.get(), &self.symbols,&self.symbol.borrow());
+        *self.page_path_list.borrow_mut() = Self::draw_items(&mut self.g, &self.items.borrow(), self.page.get(), &self.symbols,&self.symbol.borrow());
     }
 
-    pub fn draw_items(g: &mut Group, items: &[RenderItem], page: usize, symbols: &[String], s: &str) {
+    pub fn draw_items(g: &mut Group, items: &[RenderItem], page: usize, symbols: &[String], s: &str) -> Vec<PathBuf> {
         let page_size = Self::page_size(g);
         let page = page.min(items.len() / page_size + 1);
 
         g.clear();
-
         g.begin();
-        items
+
+        let plist: Vec<PathBuf> = items
             .iter()
             .skip(page_size * (page.saturating_sub(1)))
             .take(page_size)
@@ -199,9 +201,12 @@ impl BrowseMenu {
 
                 Some((p, c, symbol.clone()))
             })
-            .for_each(|(p, c, s)| {
+            .map(|(p, c, s)| {
                 MenuItem::new(p, c, s).ok();
-            });
+                p.clone()
+            })
+            .collect();
+
         g.end();
 
         reflow_widgets(
@@ -212,6 +217,8 @@ impl BrowseMenu {
             ITEM_GAP,
         );
         g.redraw();
+
+        plist
     }
 
     pub fn set_item(&mut self, items: Vec<(PathBuf, String)>) {
@@ -254,5 +261,9 @@ impl BrowseMenu {
         let max_w_item_len = clamp_w / MENU_ITEM_WIDTH;
 
         (max_w_item_len * max_h_item_len) as usize
+    }
+
+    pub fn page_first_item_path(&self) -> Option<PathBuf> {
+        self.page_path_list.borrow().get(0).cloned()
     }
 }

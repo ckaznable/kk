@@ -29,6 +29,7 @@ enum AppHandleEvent {
     GoToMenu,
     FullScreen(Option<bool>),
     SetCusor(Cursor),
+    End,
 }
 
 #[derive(Clone, Debug)]
@@ -253,13 +254,7 @@ fn main() {
                         true
                     }
                     Key::Escape => {
-                        if in_video.get() {
-                            app_tx.send(AppHandleEvent::FullScreen(Some(false)));
-                        } else {
-                            menu.reset_symbol();
-                            menu.draw();
-                        }
-
+                        app_tx.send(AppHandleEvent::End);
                         true
                     }
                     Key::BackSpace => {
@@ -267,7 +262,7 @@ fn main() {
                         menu.draw();
                         true
                     }
-                    k if k == Key::from_char('q') || k == Key::from_char('o') => {
+                    k if k == Key::from_char('q')  => {
                         app_tx.send(AppHandleEvent::GoToMenu);
                         true
                     }
@@ -302,14 +297,23 @@ fn main() {
                         menu.draw();
                         true
                     }
-                    k if k == Key::from_char('i') && !in_video.get() => {
-                        menu.push_symbol('i');
-                        menu.draw();
+                    k if k == Key::from_char('i') => {
+                        if in_video.get() {
+                            app_tx.send(AppHandleEvent::FullScreen(None));
+                        } else {
+                            menu.push_symbol('i');
+                            menu.draw();
+                        }
                         true
                     }
-                    k if k == Key::from_char('o') && !in_video.get() => {
-                        menu.push_symbol('o');
-                        menu.draw();
+                    k if k == Key::from_char('o') => {
+                        if in_video.get() {
+                            app_tx.send(AppHandleEvent::GoToMenu);
+                        } else {
+                            menu.push_symbol('o');
+                            menu.draw();
+                        }
+
                         true
                     }
                     k if k == Key::from_char('p') && !in_video.get() => {
@@ -372,6 +376,9 @@ fn main() {
                 if in_video.get() {
                     win.set_cursor(cursor);
                 }
+            }
+            End => {
+                break
             }
         }
     }

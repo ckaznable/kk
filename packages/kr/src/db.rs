@@ -1,6 +1,8 @@
 use log::warn;
 use ahash::AHashSet;
 use anyhow::Result;
+use rand::seq::SliceRandom;
+use rand::rng;
 use std::{
     path::{Path, PathBuf}, time::SystemTime
 };
@@ -53,6 +55,7 @@ pub struct SimpleJsonDatabase {
     index_ref: Vec<u32>,
     order_by_fav_index: IndexCacheTable,
     order_by_added_time_index: IndexCacheTable,
+    order_by_random_index: IndexCacheTable,
 }
 
 impl Default for SimpleJsonDatabase {
@@ -65,6 +68,7 @@ impl Default for SimpleJsonDatabase {
             index_ref,
             order_by_fav_index: IndexCacheTable::default(),
             order_by_added_time_index: IndexCacheTable::default(),
+            order_by_random_index: IndexCacheTable::default(),
         }
     }
 }
@@ -138,6 +142,7 @@ impl SimpleJsonDatabase {
             self.config = config;
             self.order_by_fav_index.dirty = true;
             self.order_by_added_time_index.dirty = true;
+            self.order_by_random_index.dirty = true;
             self.index_ref = (0..self.config.movies.len() as u32).collect();
         }
     }
@@ -167,6 +172,21 @@ impl SimpleJsonDatabase {
             .collect();
 
         let index = self.order_by_fav_index.idx.insert(data);
+        DatabaseSlice::new(&self.config.movies, index)
+    }
+
+    pub fn order_by_random<'a>(&'a mut self) -> DatabaseSlice<'a> {
+        if !self.order_by_random_index.dirty && let Some(ref idx) = self.order_by_random_index.idx {
+            return DatabaseSlice::new(&self.config.movies, idx);
+        }
+
+        self.order_by_fav_index.dirty = false;
+        let mut data = self.index_ref.clone();
+
+        let mut rng = rng();
+        data.shuffle(&mut rng);
+
+        let index = self.order_by_random_index.idx.insert(data);
         DatabaseSlice::new(&self.config.movies, index)
     }
 

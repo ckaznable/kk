@@ -1,11 +1,14 @@
 use enclose::enclose;
 use itertools::Itertools;
-use std::{cell::{Cell, RefCell}, path::{Path, PathBuf}, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use fltk::{
     draw,
     enums::{Align, Color, Font, FrameType},
-    frame::Frame,
     group::Group,
     image::SharedImage,
     prelude::{GroupExt, ImageExt, WidgetBase, WidgetExt},
@@ -22,6 +25,14 @@ const MENU_IMG_HEIGHT: i32 = 220;
 const MENU_IMG_WIDTH: i32 = 330;
 
 const ITEM_GAP: i32 = 8;
+
+#[derive(Default, Clone, Copy)]
+pub enum MenuMode {
+    #[default]
+    AddedTime,
+    Random,
+    Fav,
+}
 
 type RenderItem = (PathBuf, String);
 
@@ -130,7 +141,8 @@ pub struct BrowseMenu {
     page: Rc<Cell<usize>>,
     symbols: Rc<Vec<String>>,
     symbol: Rc<RefCell<String>>,
-    page_path_list: Rc<RefCell<Vec<PathBuf>>>
+    page_path_list: Rc<RefCell<Vec<PathBuf>>>,
+    mode: Rc<Cell<MenuMode>>,
 }
 
 impl BrowseMenu {
@@ -142,7 +154,8 @@ impl BrowseMenu {
         let n = symbols_chars.len();
         let symbols: Vec<String> = (1..=n)
             .flat_map(|len| {
-                symbols_chars.chars()
+                symbols_chars
+                    .chars()
                     .permutations(len)
                     .map(|chars| chars.into_iter().collect::<String>())
             })
@@ -153,12 +166,8 @@ impl BrowseMenu {
 
         let mut g = Group::default().with_size(width, height).with_pos(0, 0);
 
-        let mut dummy = Frame::default().with_size(0, 0);
-        dummy.hide();
-
         g.end();
         g.set_frame(FrameType::NoBox);
-        g.resizable(&dummy);
 
         g.draw(|w| {
             draw::draw_rect_fill(w.x(), w.y(), w.w(), w.h(), Color::Black);
@@ -169,14 +178,34 @@ impl BrowseMenu {
             *page_path_list.borrow_mut() = Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow());
         }));
 
-        Self { g, items, page, symbols, symbol, page_path_list }
+        Self {
+            g,
+            items,
+            page,
+            symbols,
+            symbol,
+            page_path_list,
+            mode: Rc::new(Cell::new(MenuMode::default())),
+        }
     }
 
     pub fn draw(&mut self) {
-        *self.page_path_list.borrow_mut() = Self::draw_items(&mut self.g, &self.items.borrow(), self.page.get(), &self.symbols,&self.symbol.borrow());
+        *self.page_path_list.borrow_mut() = Self::draw_items(
+            &mut self.g,
+            &self.items.borrow(),
+            self.page.get(),
+            &self.symbols,
+            &self.symbol.borrow(),
+        );
     }
 
-    pub fn draw_items(g: &mut Group, items: &[RenderItem], page: usize, symbols: &[String], s: &str) -> Vec<PathBuf> {
+    pub fn draw_items(
+        g: &mut Group,
+        items: &[RenderItem],
+        page: usize,
+        symbols: &[String],
+        s: &str,
+    ) -> Vec<PathBuf> {
         let page_size = Self::page_size(g);
         let page = page.min(items.len() / page_size + 1);
 
@@ -202,7 +231,10 @@ impl BrowseMenu {
                 Some((p, c, symbol.clone()))
             })
             .map(|(p, c, s)| {
-                MenuItem::new(p, c, s).ok();
+                if MenuItem::new(p, c, s).is_err() {
+                    println!("{:?} render failed", &p);
+                };
+
                 p.clone()
             })
             .collect();
@@ -219,6 +251,30 @@ impl BrowseMenu {
         g.redraw();
 
         plist
+    }
+
+    pub fn next_mode(&self) -> MenuMode {
+        use MenuMode::*;
+        let mode = match self.mode.get() {
+            AddedTime => Random,
+            Random => Fav,
+            Fav => AddedTime,
+        };
+
+        self.mode.set(mode);
+        mode
+    }
+
+    pub fn prev_mode(&self) -> MenuMode {
+        use MenuMode::*;
+        let mode = match self.mode.get() {
+            AddedTime => Fav,
+            Random => AddedTime,
+            Fav => Random,
+        };
+
+        self.mode.set(mode);
+        mode
     }
 
     pub fn set_item(&mut self, items: Vec<(PathBuf, String)>) {

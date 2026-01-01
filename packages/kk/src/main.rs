@@ -6,6 +6,7 @@ use fltk::{
     prelude::{GroupExt, WidgetBase, WidgetExt, WindowExt},
     window::{GlWindow, Window},
 };
+use kr::db::SimpleJsonDatabase;
 use libmpv2::Mpv;
 use serde_json::json;
 use std::{
@@ -15,7 +16,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::ui::browse::BrowseMenu;
+use crate::ui::browse::{BrowseMenu, MenuMode};
 
 mod ui;
 
@@ -66,20 +67,8 @@ fn main() {
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
         .center_of_parent();
 
-    let mut menu = BrowseMenu::new(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
-
-    menu.set_item(
-        db.borrow_mut()
-            .order_by_added_time()
-            .flat_map(|item| {
-                Some((
-                    item.path.parent()?.join(item.movie.thumb.clone()?),
-                    item.movie.title.clone(),
-                ))
-            })
-            .collect(),
-    );
-    menu.draw();
+    let menu = BrowseMenu::new(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
+    draw_menu_with_mode(menu.clone(), db.clone(), MenuMode::AddedTime);
 
     let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT).with_pos(0, 0);
     let video_layer = mpv_window();
@@ -270,7 +259,7 @@ fn main() {
                         if in_video.get() {
                             mpv_tx.send(MpvEvent::JumpNextMarker).ok();
                         } else {
-                            todo!()
+                            draw_menu_with_mode(menu.clone(), db.clone(), menu.next_mode());
                         }
                         true
                     }
@@ -324,6 +313,10 @@ fn main() {
                     }
                     k if k == Key::from_char(' ') && in_video.get() => {
                         mpv_tx.send(MpvEvent::TogglePause).ok();
+                        true
+                    }
+                    k if k == Key::from_char('b') && !in_video.get() => {
+                        draw_menu_with_mode(menu.clone(), db.clone(), menu.prev_mode());
                         true
                     }
                     _ => false
@@ -400,4 +393,25 @@ fn mpv_property(mpv: &Mpv) {
 
     mpv.observe_property("time-pos", Format::Double, 0).unwrap();
     mpv.observe_property("duration", Format::Double, 1).unwrap();
+}
+
+fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>, mode: MenuMode) {
+    let mut db = db.borrow_mut();
+    let iter = match mode {
+        MenuMode::AddedTime => db.order_by_added_time(),
+        MenuMode::Random => db.order_by_random(),
+        MenuMode::Fav => db.filter_by_fav(),
+    };
+
+    menu.set_item(
+            iter
+            .flat_map(|item| {
+                Some((
+                    item.path.parent()?.join(item.movie.thumb.clone()?),
+                    item.movie.title.clone(),
+                ))
+            })
+            .collect(),
+    );
+    menu.draw();
 }

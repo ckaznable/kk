@@ -226,14 +226,16 @@ fn main() {
                                     }
 
                                     if let Some(ext) = e.path().extension() {
-                                        ext != "nfo"
+                                        ext == "mp4" || ext == "mkv" || ext == "avi" || ext == "rmvb"
                                     } else {
                                         false
                                     }
                                 });
 
                             if let Some(filepath) = filepath {
-                                app_tx.send(AppHandleEvent::GoToVideo(filepath.path().to_string_lossy().to_string(), None));
+                                let target_path = filepath.path().to_string_lossy().to_string();
+                                println!("playing {}", &target_path);
+                                app_tx.send(AppHandleEvent::GoToVideo(target_path, None));
                             }
                         }
                         true
@@ -294,6 +296,8 @@ fn main() {
                     k if k == Key::from_char('o') => {
                         if in_video.get() {
                             app_tx.send(AppHandleEvent::GoToMenu);
+                            menu.reset_symbol();
+                            menu.draw();
                         } else {
                             menu.push_symbol('o');
                             menu.draw();

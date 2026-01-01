@@ -18,11 +18,11 @@ use crate::ui::reflow_widgets;
 
 const CONTAINER_MARGIN: i32 = 10;
 
-const MENU_ITEM_HEIGHT: i32 = 300;
+const MENU_ITEM_HEIGHT: i32 = 260;
 const MENU_ITEM_WIDTH: i32 = 350;
 
-const MENU_IMG_HEIGHT: i32 = 220;
-const MENU_IMG_WIDTH: i32 = 330;
+const MENU_IMG_HEIGHT: i32 = 208;
+const MENU_IMG_WIDTH: i32 = 312;
 
 const ITEM_GAP: i32 = 8;
 

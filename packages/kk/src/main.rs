@@ -352,10 +352,6 @@ fn main() {
                 mpv_tx.send(MpvEvent::Stop).ok();
             }
             FullScreen(v) => {
-                if !in_video.get() {
-                    continue;
-                }
-
                 let is_fullscreen = v.unwrap_or(!win.fullscreen_active());
                 win.fullscreen(is_fullscreen);
 

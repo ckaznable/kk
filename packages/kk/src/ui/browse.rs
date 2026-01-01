@@ -264,6 +264,6 @@ impl BrowseMenu {
     }
 
     pub fn page_first_item_path(&self) -> Option<PathBuf> {
-        self.page_path_list.borrow().get(0).cloned()
+        self.page_path_list.borrow().first().cloned()
     }
 }

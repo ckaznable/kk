@@ -177,10 +177,12 @@ fn main() {
                     TriggerMarkerSend => {
                         mpv.command("script-message", &["trigger_marker_send"]).ok();
                     }
+                    #[allow(unused)]
                     MouseMove(x, y) => {
                         #[cfg(target_os = "windows")]
                         mpv.command("mouse", &[&x.to_string(), &y.to_string()]).ok();
                     }
+                    #[allow(unused)]
                     MouseClick(x, y) => {
                         #[cfg(target_os = "windows")]
                         mpv.command("mouse", &[&x.to_string(), &y.to_string(), "0", "single"]).ok();
@@ -201,7 +203,7 @@ fn main() {
                     mouse_event_throttle + 1
                 };
 
-                if in_video.get() && mouse_event_throttle % 3 == 0 {
+                if in_video.get() && mouse_event_throttle.is_multiple_of(3) {
                     let (x, y) = app::event_coords();
                     mpv_tx.send(MpvEvent::MouseMove(x, y)).ok();
                     win.set_cursor(Cursor::Default);
@@ -227,11 +229,10 @@ fn main() {
                             let filename = parent.file_name().unwrap().to_str().unwrap();
                             let filepath = std::fs::read_dir(parent)
                                 .unwrap()
-                                .into_iter()
                                 .filter_map(|e| e.ok())
                                 .find(|e| {
                                     let name = e.file_name().to_string_lossy().to_string();
-                                    if !name.starts_with(&filename) {
+                                    if !name.starts_with(filename) {
                                         return false;
                                     }
 

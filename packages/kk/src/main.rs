@@ -45,11 +45,6 @@ enum MpvEvent {
 }
 
 fn main() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        env::set_var("FLTK_BACKEND", "x11");
-    }
-
     let search_path = env::var("KK_SEARCH_PATH").expect("KK_SEARCH_PATH env variable is required");
     let search_path = PathBuf::from(search_path);
 
@@ -399,12 +394,6 @@ fn mpv_window() -> GlWindow {
 #[inline]
 fn mpv_property(mpv: &Mpv) {
     use libmpv2::Format;
-
-    #[cfg(target_os = "linux")]
-    {
-        mpv.set_property("gpu-api", "opengl").unwrap();
-        mpv.set_property("gpu-context", "x11egl").unwrap();
-    }
 
     mpv.set_property("hwdec", "auto").unwrap();
 

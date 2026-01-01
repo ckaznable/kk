@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 enclose = { workspace = true }
-fltk = { version = "^1.5", features = ["enable-glwindow", "use-ninja"] }
+fltk = { version = "^1.5", features = ["enable-glwindow", "use-ninja", "use-wayland"] }
 fltk-theme = "0.7.9"
 libmpv2 = { git = "https://github.com/ckaznable/libmpv2-rs.git" }
 tempfile = "3.24.0"

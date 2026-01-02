@@ -1,8 +1,9 @@
 use enclose::enclose;
 use itertools::Itertools;
+use kr::db::IndexedMovieData;
 use std::{
     cell::{Cell, RefCell},
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::Rc,
 };
 
@@ -34,17 +35,42 @@ pub enum MenuMode {
     Fav,
 }
 
-type RenderItem = (PathBuf, String);
+#[derive(Clone)]
+pub struct RenderItem {
+    nfo_path: PathBuf,
+    img_path: PathBuf,
+    title: String,
+    index: u32,
+}
+
+impl TryFrom<IndexedMovieData<'_>> for RenderItem {
+    type Error = ();
+
+    fn try_from(value: IndexedMovieData<'_>) -> Result<Self, Self::Error> {
+        let nfo_path = value.movie.path.clone();
+        let img_path = nfo_path
+            .parent()
+            .ok_or(())?
+            .join(value.movie.movie.thumb.clone().ok_or(())?);
+
+        Ok(Self {
+            nfo_path,
+            img_path,
+            title: value.movie.movie.title.clone(),
+            index: value.index,
+        })
+    }
+}
 
 pub struct MenuItem;
 
 impl MenuItem {
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(img_path: &Path, content: &str, symbol: String) -> anyhow::Result<Group> {
-        let mut img = SharedImage::load(img_path)?;
+    pub fn new(item: RenderItem, symbol: String) -> anyhow::Result<Group> {
+        let mut img = SharedImage::load(item.img_path)?;
         img.scale(MENU_IMG_WIDTH, MENU_IMG_HEIGHT, true, true);
 
-        let full_txt = content.to_string();
+        let full_txt = item.title;
         let mut draw_img = img.clone();
 
         let mut item = Group::default().with_size(MENU_ITEM_WIDTH, MENU_ITEM_HEIGHT);
@@ -141,7 +167,7 @@ pub struct BrowseMenu {
     page: Rc<Cell<usize>>,
     symbols: Rc<Vec<String>>,
     symbol: Rc<RefCell<String>>,
-    page_path_list: Rc<RefCell<Vec<PathBuf>>>,
+    page_index_list: Rc<RefCell<Vec<u32>>>,
     mode: Rc<Cell<MenuMode>>,
 }
 
@@ -184,13 +210,13 @@ impl BrowseMenu {
             page,
             symbols,
             symbol,
-            page_path_list,
+            page_index_list: page_path_list,
             mode: Rc::new(Cell::new(MenuMode::default())),
         }
     }
 
     pub fn draw(&mut self) {
-        *self.page_path_list.borrow_mut() = Self::draw_items(
+        *self.page_index_list.borrow_mut() = Self::draw_items(
             &mut self.g,
             &self.items.borrow(),
             self.page.get(),
@@ -205,19 +231,19 @@ impl BrowseMenu {
         page: usize,
         symbols: &[String],
         s: &str,
-    ) -> Vec<PathBuf> {
+    ) -> Vec<u32> {
         let page_size = Self::page_size(g);
         let page = page.min(items.len() / page_size + 1);
 
         g.clear();
         g.begin();
 
-        let plist: Vec<PathBuf> = items
+        let plist: Vec<u32> = items
             .iter()
             .skip(page_size * (page.saturating_sub(1)))
             .take(page_size)
             .enumerate()
-            .filter_map(|(i, (p, c))| {
+            .filter_map(|(i, item)| {
                 let symbol = if i > symbols.len() {
                     &symbols[symbols.len() % i]
                 } else {
@@ -228,14 +254,14 @@ impl BrowseMenu {
                     return None;
                 }
 
-                Some((p, c, symbol.clone()))
+                Some((item, symbol.clone()))
             })
-            .map(|(p, c, s)| {
-                if MenuItem::new(p, c, s).is_err() {
-                    println!("{:?} render failed", &p);
+            .map(|(item, s)| {
+                if MenuItem::new(item.clone(), s).is_err() {
+                    println!("{:?} render failed", item.nfo_path);
                 };
 
-                p.clone()
+                item.index
             })
             .collect();
 
@@ -277,7 +303,7 @@ impl BrowseMenu {
         mode
     }
 
-    pub fn set_item(&mut self, items: Vec<(PathBuf, String)>) {
+    pub fn set_item(&mut self, items: Vec<RenderItem>) {
         *self.items.borrow_mut() = items;
     }
 
@@ -319,7 +345,7 @@ impl BrowseMenu {
         (max_w_item_len * max_h_item_len) as usize
     }
 
-    pub fn page_first_item_path(&self) -> Option<PathBuf> {
-        self.page_path_list.borrow().first().cloned()
+    pub fn page_first_item_path(&self) -> Option<u32> {
+        self.page_index_list.borrow().first().cloned()
     }
 }

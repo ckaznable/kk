@@ -10,8 +10,8 @@ use kr::db::SimpleJsonDatabase;
 use libmpv2::Mpv;
 use serde_json::json;
 use std::{
-    env,
     cell::{Cell, RefCell},
+    env,
     path::PathBuf,
     rc::Rc,
 };
@@ -70,7 +70,9 @@ fn main() {
     let menu = BrowseMenu::new(INIT_WIN_WIDTH, INIT_WIN_HEIGHT);
     draw_menu_with_mode(menu.clone(), db.clone(), MenuMode::AddedTime);
 
-    let video_group = Group::default().with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT).with_pos(0, 0);
+    let video_group = Group::default()
+        .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
+        .with_pos(0, 0);
     let video_layer = mpv_window();
     video_group.end();
 
@@ -183,7 +185,7 @@ fn main() {
 
     let in_video = Rc::new(Cell::new(false));
     let mut mouse_event_throttle = 0u8;
-    win.handle(enclose!((app_tx, mpv_tx, in_video, mut menu) move |win, ev| {
+    win.handle(enclose!((app_tx, mpv_tx, in_video, mut menu, db) move |win, ev| {
         match ev {
             Event::Move => {
                 mouse_event_throttle = if mouse_event_throttle > 3 {
@@ -213,32 +215,20 @@ fn main() {
                 let key = app::event_key();
                 return match key {
                     Key::Enter => {
-                        if let Some(p) = menu.page_first_item_path() {
-                            let parent = p.parent().unwrap();
-                            let filename = parent.file_name().unwrap().to_str().unwrap();
-                            let filepath = std::fs::read_dir(parent)
-                                .unwrap()
-                                .filter_map(|e| e.ok())
-                                .find(|e| {
-                                    let name = e.file_name().to_string_lossy().to_string();
-                                    if !name.starts_with(filename) {
-                                        return false;
-                                    }
+                        if let Some(i) = menu.page_first_item_path() && let Some(data) = db.borrow().get_movie(i as usize) {
+                            let parent = data.path.parent().unwrap();
+                            let filename = data.path.file_prefix().unwrap().to_str().unwrap();
 
-                                    if let Some(ext) = e.path().extension() {
-                                        ext == "mp4" || ext == "mkv" || ext == "avi" || ext == "rmvb"
-                                    } else {
-                                        false
-                                    }
-                                });
-
-                            if let Some(filepath) = filepath {
-                                let target_path = filepath.path().to_string_lossy().to_string();
-                                println!("playing {}", &target_path);
-                                app_tx.send(AppHandleEvent::GoToVideo(target_path, None));
+                            for ext in ["mp4", "mkv", "avi", "rmvb"] {
+                                let p = parent.join(format!("{filename}.{ext}"));
+                                if p.exists() {
+                                    println!("playing {:?}", &p);
+                                    app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), None));
+                                    return true;
+                                }
                             }
                         }
-                        true
+                        false
                     }
                     Key::Escape => {
                         app_tx.send(AppHandleEvent::End);
@@ -366,9 +356,7 @@ fn main() {
                     win.set_cursor(cursor);
                 }
             }
-            End => {
-                break
-            }
+            End => break,
         }
     }
 }
@@ -403,15 +391,6 @@ fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>
         MenuMode::Fav => db.filter_by_fav(),
     };
 
-    menu.set_item(
-            iter
-            .flat_map(|item| {
-                Some((
-                    item.path.parent()?.join(item.movie.thumb.clone()?),
-                    item.movie.title.clone(),
-                ))
-            })
-            .collect(),
-    );
+    menu.set_item(iter.flat_map(|item| item.try_into().ok()).collect());
     menu.draw();
 }

@@ -202,6 +202,16 @@ impl SimpleJsonDatabase {
         let index = self.order_by_added_time_index.idx.insert(data);
         DatabaseSlice::new(&self.config.movies, index)
     }
+
+    pub fn get_movie(&self, i: usize) -> Option<&MovieData> {
+        self.config.movies.get(i)
+    }
+}
+
+#[derive(Clone)]
+pub struct IndexedMovieData<'a> {
+    pub movie: &'a MovieData,
+    pub index: u32,
 }
 
 pub struct DatabaseSlice<'a> {
@@ -217,12 +227,15 @@ impl<'a> DatabaseSlice<'a> {
 }
 
 impl<'a> Iterator for DatabaseSlice<'a> {
-    type Item = &'a MovieData;
+    type Item = IndexedMovieData<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.i += 1;
         self.index
             .get(self.i - 1)
-            .and_then(|i| self.items.get(*i as usize))
+            .and_then(|i| {
+                let movie = self.items.get(*i as usize)?;
+                Some(IndexedMovieData { movie, index: *i })
+            })
     }
 }

@@ -387,6 +387,7 @@ fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>
         MenuMode::Fav => db.filter_by_fav(),
     };
 
+    menu.set_page(1);
     menu.set_item(iter.flat_map(|item| item.try_into().ok()).collect());
     menu.draw();
 }

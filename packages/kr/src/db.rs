@@ -51,7 +51,7 @@ pub struct MovieData {
 
 #[derive(Debug)]
 pub struct SimpleJsonDatabase {
-    config: Config,
+    pub config: Config,
     index_ref: Vec<u32>,
     order_by_fav_index: IndexCacheTable,
     order_by_added_time_index: IndexCacheTable,
@@ -74,6 +74,12 @@ impl Default for SimpleJsonDatabase {
 }
 
 impl SimpleJsonDatabase {
+    pub fn new() -> Result<Self> {
+        let mut def = Self::default();
+        def.config = Self::init_config()?;
+        Ok(def)
+    }
+
     pub fn load_config(&mut self, p: &Path) -> Result<()> {
         self.config = Self::load(p)?;
         self.index_ref = (0..self.config.movies.len() as u32).collect();

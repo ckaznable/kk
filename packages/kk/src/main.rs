@@ -1,3 +1,4 @@
+use dirs::SEARCH_PATH;
 use enclose::enclose;
 use fltk::{
     app,
@@ -11,8 +12,6 @@ use libmpv2::Mpv;
 use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
-    env,
-    path::PathBuf,
     rc::Rc,
 };
 
@@ -46,11 +45,8 @@ enum MpvEvent {
 }
 
 fn main() {
-    let search_path = env::var("KK_SEARCH_PATH").expect("KK_SEARCH_PATH env variable is required");
-    let search_path = PathBuf::from(search_path);
-
     let mut db = kr::init();
-    db.load_config(&search_path).ok();
+    db.load_config(&SEARCH_PATH).ok();
     let db = Rc::new(RefCell::new(db));
 
     let (app_tx, app_rx) = app::channel::<AppHandleEvent>();

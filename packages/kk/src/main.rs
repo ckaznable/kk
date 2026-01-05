@@ -223,6 +223,8 @@ fn main() {
                                     return true;
                                 }
                             }
+
+                            println!("{parent:?} {filename} video file not found");
                         }
                         false
                     }

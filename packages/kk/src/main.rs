@@ -42,6 +42,7 @@ enum MpvEvent {
     TriggerMarkerSend,
     MouseMove(i32, i32),
     MouseClick(i32, i32),
+    SeekRelative(i32),
 }
 
 fn main() {
@@ -174,6 +175,9 @@ fn main() {
                         #[cfg(target_os = "windows")]
                         mpv.command("mouse", &[&x.to_string(), &y.to_string(), "0", "single"]).ok();
                     }
+                    SeekRelative(s) => {
+                        mpv.command("seek", &[&s.to_string(), "relative"]).ok();
+                    }
                 }
             }
         }
@@ -253,14 +257,23 @@ fn main() {
                         }
                         true
                     }
-                    k if k == Key::from_char('h') && !in_video.get() => {
-                        menu.prev_page();
-                        menu.draw();
+                    k if k == Key::from_char('h') => {
+                        if in_video.get() {
+                            mpv_tx.send(MpvEvent::SeekRelative(-5)).ok();
+                        } else {
+                            menu.prev_page();
+                            menu.draw();
+                        }
                         true
                     }
-                    k if k == Key::from_char('l') && !in_video.get() => {
-                        menu.next_page();
-                        menu.draw();
+                    k if k == Key::from_char('l') => {
+                        if in_video.get() {
+                            mpv_tx.send(MpvEvent::SeekRelative(5)).ok();
+                        } else {
+                            menu.next_page();
+                            menu.draw();
+                        }
+
                         true
                     }
                     k if k == Key::from_char('m') && in_video.get() => {

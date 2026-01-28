@@ -232,7 +232,14 @@ fn main() {
                             return true;
                         }
                     } else {
-                        // Left-click on item: play video
+                        // Left-click handler
+                        // First check if clicking on status bar to toggle mode
+                        if menu.is_status_bar_click(x, y) {
+                            draw_menu_with_mode(menu.clone(), db.clone(), menu.next_mode());
+                            return true;
+                        }
+                        
+                        // Otherwise, check if clicking on item to play video
                         if let Some(item_index) = menu.get_item_at_pos(x, y) {
                             if let Some(data) = db.borrow().get_movie(item_index as usize) {
                                 let parent = data.path.parent().unwrap();
@@ -351,8 +358,13 @@ fn main() {
 
                         true
                     }
-                    k if k == Key::from_char('m') && in_video.get() => {
-                        mpv_tx.send(MpvEvent::TriggerMarkerSend).ok();
+                    k if k == Key::from_char('m') => {
+                        if in_video.get() {
+                            mpv_tx.send(MpvEvent::TriggerMarkerSend).ok();
+                        } else {
+                            // Toggle to Favorites mode in menu
+                            draw_menu_with_mode(menu.clone(), db.clone(), MenuMode::Fav);
+                        }
                         true
                     }
                     k if k == Key::from_char('u') && !in_video.get() => {
@@ -477,7 +489,10 @@ fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>
         MenuMode::Fav => db.filter_by_fav(),
     };
 
+    let items: Vec<_> = iter.flat_map(|item| item.try_into().ok()).collect();
+    println!("Mode: {} - Items count: {}", mode.display_name(), items.len());
+    
     menu.set_page(1);
-    menu.set_item(iter.flat_map(|item| item.try_into().ok()).collect());
+    menu.set_item(items);
     menu.draw();
 }

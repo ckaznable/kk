@@ -193,7 +193,7 @@ impl SimpleJsonDatabase {
             return DatabaseSlice::new(&self.config.movies, idx);
         }
 
-        self.order_by_fav_index.dirty = false;
+        self.order_by_random_index.dirty = false;
         let mut data = self.index_ref.clone();
 
         let mut rng = rng();

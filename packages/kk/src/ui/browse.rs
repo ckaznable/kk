@@ -35,6 +35,16 @@ pub enum MenuMode {
     Fav,
 }
 
+impl MenuMode {
+    pub fn display_name(&self) -> &str {
+        match self {
+            MenuMode::AddedTime => "Recent",
+            MenuMode::Random => "Random",
+            MenuMode::Fav => "Favorites",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RenderItem {
     nfo_path: PathBuf,
@@ -215,8 +225,13 @@ impl BrowseMenu {
             w.draw_children();
         });
 
-        g.resize_callback(enclose!((items, page, symbols, symbol, page_path_list) move |w, _x, _y, _width, _height| {
-            *page_path_list.borrow_mut() = Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow());
+        let mode = Rc::new(Cell::new(MenuMode::default()));
+
+        g.resize_callback(enclose!((items, page, symbols, symbol, page_path_list, mode) move |w, _x, _y, _width, _height| {
+            let page_size = Self::page_size(w);
+            let total_items = items.borrow().len();
+            let total_pages = if total_items == 0 { 1 } else { (total_items + page_size - 1) / page_size };
+            *page_path_list.borrow_mut() = Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow(), mode.get(), total_pages);
         }));
 
         Self {
@@ -226,17 +241,29 @@ impl BrowseMenu {
             symbols,
             symbol,
             page_index_list: page_path_list,
-            mode: Rc::new(Cell::new(MenuMode::default())),
+            mode,
         }
     }
 
     pub fn draw(&mut self) {
+        let mode = self.mode.get();
+        let page = self.page.get();
+        let page_size = Self::page_size(&self.g);
+        let total_items = self.items.borrow().len();
+        let total_pages = if total_items == 0 {
+            1
+        } else {
+            (total_items + page_size - 1) / page_size
+        };
+
         *self.page_index_list.borrow_mut() = Self::draw_items(
             &mut self.g,
             &self.items.borrow(),
-            self.page.get(),
+            page,
             &self.symbols,
             &self.symbol.borrow(),
+            mode,
+            total_pages,
         );
     }
 
@@ -246,6 +273,8 @@ impl BrowseMenu {
         page: usize,
         symbols: &[String],
         s: &str,
+        mode: MenuMode,
+        total_pages: usize,
     ) -> Vec<u32> {
         let page_size = Self::page_size(g);
         let page = page.min(items.len() / page_size + 1);
@@ -289,6 +318,25 @@ impl BrowseMenu {
             CONTAINER_MARGIN,
             ITEM_GAP,
         );
+
+        // Draw status bar at the bottom
+        let status_bar_height = 30;
+        let status_text = format!(
+            "Page {}/{} | Mode: {}",
+            page,
+            total_pages,
+            mode.display_name()
+        );
+
+        g.begin();
+        let mut status_frame = fltk::frame::Frame::default()
+            .with_size(g.w(), status_bar_height)
+            .with_pos(g.x(), g.y() + g.h() - status_bar_height);
+        status_frame.set_label(&status_text);
+        status_frame.set_label_color(Color::White);
+        status_frame.set_label_size(14);
+        g.end();
+
         g.redraw();
 
         plist
@@ -401,5 +449,16 @@ impl BrowseMenu {
 
         // Get the item from page_index_list
         self.page_index_list.borrow().get(idx).cloned()
+    }
+
+    /// Check if the click is on the status bar
+    pub fn is_status_bar_click(&self, x: i32, y: i32) -> bool {
+        let status_bar_height = 30;
+        let status_bar_y = self.g.y() + self.g.h() - status_bar_height;
+
+        x >= self.g.x()
+            && x <= self.g.x() + self.g.w()
+            && y >= status_bar_y
+            && y <= self.g.y() + self.g.h()
     }
 }

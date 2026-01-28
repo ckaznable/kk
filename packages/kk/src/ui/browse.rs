@@ -41,6 +41,7 @@ pub struct RenderItem {
     img_path: PathBuf,
     title: String,
     index: u32,
+    fav: bool,
 }
 
 impl TryFrom<IndexedMovieData<'_>> for RenderItem {
@@ -58,6 +59,7 @@ impl TryFrom<IndexedMovieData<'_>> for RenderItem {
             img_path,
             title: value.movie.movie.title.clone(),
             index: value.index,
+            fav: value.movie.fav,
         })
     }
 }
@@ -72,6 +74,7 @@ impl MenuItem {
 
         let full_txt = item.title;
         let mut draw_img = img.clone();
+        let is_fav = item.fav;
 
         let mut item = Group::default().with_size(MENU_ITEM_WIDTH, MENU_ITEM_HEIGHT);
         item.set_frame(FrameType::NoBox);
@@ -81,6 +84,18 @@ impl MenuItem {
             let img_y = w.y() + img_y_fix;
 
             draw_img.draw(img_x, img_y, MENU_IMG_WIDTH, MENU_IMG_HEIGHT);
+
+            // Draw favorite heart icon only when favorited
+            if is_fav {
+                let heart_size = 20;
+                let heart_x = img_x + MENU_IMG_WIDTH - heart_size - 5;
+                let heart_y = img_y + 5;
+
+                // Draw filled red heart for favorited items
+                draw::set_draw_color(Color::from_rgb(220, 53, 69)); // Red color
+                draw::set_font(Font::Helvetica, heart_size);
+                draw::draw_text2("♥", heart_x, heart_y, heart_size, heart_size, Align::Center);
+            }
 
             draw::set_draw_color(Color::White);
             draw::set_font(Font::Helvetica, 14);
@@ -289,6 +304,10 @@ impl BrowseMenu {
 
         self.mode.set(mode);
         mode
+    }
+
+    pub fn current_mode(&self) -> MenuMode {
+        self.mode.get()
     }
 
     pub fn prev_mode(&self) -> MenuMode {

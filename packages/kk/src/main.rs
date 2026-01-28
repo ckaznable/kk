@@ -204,28 +204,51 @@ fn main() {
                 false
             },
             Event::Push => {
+                let mouse_button = app::event_button();
+                
                 if in_video.get(){
-                    let (x, y) = app::event_coords();
-                    mpv_tx.send(MpvEvent::MouseClick(x, y)).ok();
-                    return true;
+                    if mouse_button == 3 {
+                        // Right-click in video mode: exit to menu
+                        app_tx.send(AppHandleEvent::GoToMenu);
+                        return true;
+                    } else {
+                        // Left-click: send to MPV
+                        let (x, y) = app::event_coords();
+                        mpv_tx.send(MpvEvent::MouseClick(x, y)).ok();
+                        return true;
+                    }
                 } else {
                     // Handle mouse click in menu mode
                     let (x, y) = app::event_coords();
-                    if let Some(item_index) = menu.get_item_at_pos(x, y) {
-                        if let Some(data) = db.borrow().get_movie(item_index as usize) {
-                            let parent = data.path.parent().unwrap();
-                            let filename = data.path.file_prefix().unwrap().to_str().unwrap();
+                    
+                    if mouse_button == 3 {
+                        // Right-click on item: toggle favorite
+                        if let Some(item_index) = menu.get_item_at_pos(x, y) {
+                            let new_fav_status = db.borrow_mut().toggle_fav(item_index as usize);
+                            db.borrow().flush(); // Save the changes to disk
+                            // Reload menu data to update the heart icon
+                            draw_menu_with_mode(menu.clone(), db.clone(), menu.current_mode());
+                            println!("Item {} favorite status toggled: {}", item_index, new_fav_status);
+                            return true;
+                        }
+                    } else {
+                        // Left-click on item: play video
+                        if let Some(item_index) = menu.get_item_at_pos(x, y) {
+                            if let Some(data) = db.borrow().get_movie(item_index as usize) {
+                                let parent = data.path.parent().unwrap();
+                                let filename = data.path.file_prefix().unwrap().to_str().unwrap();
 
-                            for ext in ["mp4", "mkv", "avi", "rmvb"] {
-                                let p = parent.join(format!("{filename}.{ext}"));
-                                if p.exists() {
-                                    println!("playing {:?}", &p);
-                                    app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), None));
-                                    return true;
+                                for ext in ["mp4", "mkv", "avi", "rmvb"] {
+                                    let p = parent.join(format!("{filename}.{ext}"));
+                                    if p.exists() {
+                                        println!("playing {:?}", &p);
+                                        app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), None));
+                                        return true;
+                                    }
                                 }
-                            }
 
-                            println!("{parent:?} {filename} video file not found");
+                                println!("{parent:?} {filename} video file not found");
+                            }
                         }
                     }
                 }
@@ -280,6 +303,17 @@ fn main() {
                     Key::BackSpace => {
                         menu.pop_symbol();
                         menu.draw();
+                        true
+                    }
+                    k if k == Key::from_char('s') && !in_video.get() => {
+                        // Toggle favorite status for the first item on the current page
+                        if let Some(i) = menu.page_first_item_path() {
+                            let new_fav_status = db.borrow_mut().toggle_fav(i as usize);
+                            db.borrow().flush(); // Save the changes to disk
+                            // Reload menu data to update the heart icon
+                            draw_menu_with_mode(menu.clone(), db.clone(), menu.current_mode());
+                            println!("Item {} favorite status: {}", i, new_fav_status);
+                        }
                         true
                     }
                     k if k == Key::from_char('q')  => {

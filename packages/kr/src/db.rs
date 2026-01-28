@@ -1,10 +1,11 @@
-use log::warn;
 use ahash::AHashSet;
 use anyhow::Result;
-use rand::seq::SliceRandom;
+use log::warn;
 use rand::rng;
+use rand::seq::SliceRandom;
 use std::{
-    path::{Path, PathBuf}, time::SystemTime
+    path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +37,7 @@ impl Default for IndexCacheTable {
     fn default() -> Self {
         Self {
             idx: None,
-            dirty: true
+            dirty: true,
         }
     }
 }
@@ -161,7 +162,9 @@ impl SimpleJsonDatabase {
     }
 
     pub fn filter_by_fav<'a>(&'a mut self) -> DatabaseSlice<'a> {
-        if !self.order_by_fav_index.dirty && let Some(ref idx) = self.order_by_fav_index.idx {
+        if !self.order_by_fav_index.dirty
+            && let Some(ref idx) = self.order_by_fav_index.idx
+        {
             return DatabaseSlice::new(&self.config.movies, idx);
         }
 
@@ -171,7 +174,9 @@ impl SimpleJsonDatabase {
             .iter()
             .copied()
             .filter(|i| {
-                self.config.movies.get(*i as usize)
+                self.config
+                    .movies
+                    .get(*i as usize)
                     .map(|d| d.fav)
                     .unwrap_or(false)
             })
@@ -182,7 +187,9 @@ impl SimpleJsonDatabase {
     }
 
     pub fn order_by_random<'a>(&'a mut self) -> DatabaseSlice<'a> {
-        if !self.order_by_random_index.dirty && let Some(ref idx) = self.order_by_random_index.idx {
+        if !self.order_by_random_index.dirty
+            && let Some(ref idx) = self.order_by_random_index.idx
+        {
             return DatabaseSlice::new(&self.config.movies, idx);
         }
 
@@ -197,7 +204,9 @@ impl SimpleJsonDatabase {
     }
 
     pub fn order_by_added_time<'a>(&'a mut self) -> DatabaseSlice<'a> {
-        if !self.order_by_added_time_index.dirty && let Some(ref idx) = self.order_by_added_time_index.idx {
+        if !self.order_by_added_time_index.dirty
+            && let Some(ref idx) = self.order_by_added_time_index.idx
+        {
             return DatabaseSlice::new(&self.config.movies, idx);
         }
 
@@ -211,6 +220,17 @@ impl SimpleJsonDatabase {
 
     pub fn get_movie(&self, i: usize) -> Option<&MovieData> {
         self.config.movies.get(i)
+    }
+
+    /// Toggle the favorite status of a movie at the given index
+    pub fn toggle_fav(&mut self, i: usize) -> bool {
+        if let Some(movie) = self.config.movies.get_mut(i) {
+            movie.fav = !movie.fav;
+            // Mark the fav index as dirty so it will be recalculated
+            self.order_by_fav_index.dirty = true;
+            return movie.fav;
+        }
+        false
     }
 }
 
@@ -237,11 +257,9 @@ impl<'a> Iterator for DatabaseSlice<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.i += 1;
-        self.index
-            .get(self.i - 1)
-            .and_then(|i| {
-                let movie = self.items.get(*i as usize)?;
-                Some(IndexedMovieData { movie, index: *i })
-            })
+        self.index.get(self.i - 1).and_then(|i| {
+            let movie = self.items.get(*i as usize)?;
+            Some(IndexedMovieData { movie, index: *i })
+        })
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "kl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["blocking", "cookies"] }
+scraper = "0.22"
+quick-xml = { version = "0.38.4", features = ["serialize"] }
+kr = { path = "../kr" }
+clap = { version = "4.5", features = ["derive"] }
+regex = "1.10"
+walkdir = "2.5"
+dirs = { workspace = true }

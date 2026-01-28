@@ -208,6 +208,47 @@ fn main() {
                     let (x, y) = app::event_coords();
                     mpv_tx.send(MpvEvent::MouseClick(x, y)).ok();
                     return true;
+                } else {
+                    // Handle mouse click in menu mode
+                    let (x, y) = app::event_coords();
+                    if let Some(item_index) = menu.get_item_at_pos(x, y) {
+                        if let Some(data) = db.borrow().get_movie(item_index as usize) {
+                            let parent = data.path.parent().unwrap();
+                            let filename = data.path.file_prefix().unwrap().to_str().unwrap();
+
+                            for ext in ["mp4", "mkv", "avi", "rmvb"] {
+                                let p = parent.join(format!("{filename}.{ext}"));
+                                if p.exists() {
+                                    println!("playing {:?}", &p);
+                                    app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), None));
+                                    return true;
+                                }
+                            }
+
+                            println!("{parent:?} {filename} video file not found");
+                        }
+                    }
+                }
+                false
+            }
+            Event::MouseWheel => {
+                // Handle mouse wheel scrolling in menu mode for page navigation
+                if !in_video.get() {
+                    use fltk::app::MouseWheel;
+                    match app::event_dy() {
+                        MouseWheel::Up => {
+                            // Scroll up - go to previous page
+                            menu.prev_page();
+                            menu.draw();
+                        }
+                        MouseWheel::Down => {
+                            // Scroll down - go to next page
+                            menu.next_page();
+                            menu.draw();
+                        }
+                        _ => {}
+                    }
+                    return true;
                 }
                 false
             }

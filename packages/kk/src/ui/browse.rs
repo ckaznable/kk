@@ -348,4 +348,39 @@ impl BrowseMenu {
     pub fn page_first_item_path(&self) -> Option<u32> {
         self.page_index_list.borrow().first().cloned()
     }
+
+    /// Get the item index at the given position (x, y)
+    pub fn get_item_at_pos(&self, x: i32, y: i32) -> Option<u32> {
+        // Check if the click is within the menu group
+        if x < self.g.x()
+            || x > self.g.x() + self.g.w()
+            || y < self.g.y()
+            || y > self.g.y() + self.g.h()
+        {
+            return None;
+        }
+
+        // Calculate the grid dimensions
+        let w = self.g.w();
+        let clamp_w = w - CONTAINER_MARGIN * 2;
+        let max_w_item_len = clamp_w / MENU_ITEM_WIDTH;
+
+        // Calculate relative position from the menu group origin
+        let rel_x = x - self.g.x() - CONTAINER_MARGIN;
+        let rel_y = y - self.g.y() - CONTAINER_MARGIN;
+
+        if rel_x < 0 || rel_y < 0 {
+            return None;
+        }
+
+        // Calculate which column and row was clicked
+        let col = rel_x / MENU_ITEM_WIDTH;
+        let row = rel_y / MENU_ITEM_HEIGHT;
+
+        // Calculate the index in the current page
+        let idx = (row * max_w_item_len + col) as usize;
+
+        // Get the item from page_index_list
+        self.page_index_list.borrow().get(idx).cloned()
+    }
 }

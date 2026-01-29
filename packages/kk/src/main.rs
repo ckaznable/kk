@@ -226,8 +226,8 @@ fn main() {
                         if let Some(item_index) = menu.get_item_at_pos(x, y) {
                             let new_fav_status = db.borrow_mut().toggle_fav(item_index as usize);
                             db.borrow().flush(); // Save the changes to disk
-                            // Reload menu data to update the heart icon
-                            draw_menu_with_mode(menu.clone(), db.clone(), menu.current_mode());
+                            // Reload menu data to update the heart icon, keeping current page
+                            redraw_menu_keep_page(menu.clone(), db.clone(), menu.current_mode());
                             println!("Item {} favorite status toggled: {}", item_index, new_fav_status);
                             return true;
                         }
@@ -493,6 +493,22 @@ fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>
     println!("Mode: {} - Items count: {}", mode.display_name(), items.len());
     
     menu.set_page(1);
+    menu.set_item(items);
+    menu.draw();
+}
+
+fn redraw_menu_keep_page(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>, mode: MenuMode) {
+    let current_page = menu.current_page();
+    let mut db = db.borrow_mut();
+    let iter = match mode {
+        MenuMode::AddedTime => db.order_by_added_time(),
+        MenuMode::Random => db.order_by_random(),
+        MenuMode::Fav => db.filter_by_fav(),
+    };
+
+    let items: Vec<_> = iter.flat_map(|item| item.try_into().ok()).collect();
+    
+    menu.set_page(current_page);
     menu.set_item(items);
     menu.draw();
 }

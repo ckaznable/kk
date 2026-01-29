@@ -400,6 +400,10 @@ impl BrowseMenu {
         self.set_page(self.page.get().saturating_sub(1).max(1));
     }
 
+    pub fn current_page(&self) -> usize {
+        self.page.get()
+    }
+
     pub fn page_size(g: &Group) -> usize {
         let h = g.h();
         let clamp_h = h - CONTAINER_MARGIN * 2;

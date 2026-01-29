@@ -13,7 +13,7 @@ impl JavdbScraper {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".parse()?,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36".parse()?,
         );
 
         let client = Client::builder()
@@ -151,7 +151,14 @@ impl JavdbScraper {
                 .to_string();
             Ok(title)
         } else {
-            Err(anyhow!("Title not found"))
+            let current_title_selector = Selector::parse(".current-title").unwrap();
+            if let Some(title_el) = document.select(&current_title_selector).next() {
+                let title_text = title_el.text().collect::<String>();
+                let title = title_text.trim().replace(number, "").trim().to_string();
+                Ok(title)
+            } else {
+                Err(anyhow!("Title not found"))
+            }
         }
     }
 

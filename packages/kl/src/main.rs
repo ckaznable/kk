@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use kl::Scraper;
 use std::fs;
 use std::io::Write;
@@ -9,41 +9,55 @@ use walkdir::WalkDir;
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    #[arg(short, long)]
-    input: Option<PathBuf>,
-    #[arg(short, long)]
-    output: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Scrape and organize files
+    Tidy {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
 
     /// Fix database issues like broken thumbnails
-    #[arg(long)]
-    fix_db: bool,
+    FixDb {
+        /// Perform a trial run without changes
+        #[arg(long)]
+        dry_run: bool,
 
-    /// Perform a trial run without changes
-    #[arg(long)]
-    dry_run: bool,
+        /// Test fix on the first item found (execute scrape/download) but do not save changes
+        #[arg(long)]
+        test_first: bool,
 
-    /// Test fix on the first item found (execute scrape/download) but do not save changes
-    #[arg(long)]
-    test_first: bool,
+        /// Limit the number of items to fix (and save)
+        #[arg(long)]
+        fix_num: Option<usize>,
 
-    /// Limit the number of items to fix (and save)
-    #[arg(long)]
-    fix_num: Option<usize>,
-
-    /// List items that need fixing without taking action
-    #[arg(long)]
-    list_need_fix: bool,
+        /// List items that need fixing without taking action
+        #[arg(long)]
+        list_need_fix: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if cli.fix_db {
-        run_fix_db(cli.dry_run, cli.test_first, cli.fix_num, cli.list_need_fix)?;
-    } else if let (Some(input), Some(output)) = (cli.input, cli.output) {
-        run_scraper(input, output)?;
-    } else {
-        println!("Please provide --input and --output for scraping, or --fix-db for database maintenance.");
+    match cli.command {
+        Commands::FixDb {
+            dry_run,
+            test_first,
+            fix_num,
+            list_need_fix,
+        } => {
+            run_fix_db(dry_run, test_first, fix_num, list_need_fix)?;
+        }
+        Commands::Tidy { input, output } => {
+            run_scraper(input, output)?;
+        }
     }
     Ok(())
 }

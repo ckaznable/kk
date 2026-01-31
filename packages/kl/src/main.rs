@@ -20,7 +20,7 @@ enum Commands {
         #[arg(short, long)]
         input: PathBuf,
         #[arg(short, long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
     },
 
     /// Fix database issues like broken thumbnails
@@ -56,7 +56,8 @@ fn main() -> anyhow::Result<()> {
             run_fix_db(dry_run, test_first, fix_num, list_need_fix)?;
         }
         Commands::Tidy { input, output } => {
-            run_scraper(input, output)?;
+            let output_path = output.unwrap_or_else(|| dirs::SEARCH_PATH.to_path_buf());
+            run_scraper(input, output_path)?;
         }
     }
     Ok(())
@@ -350,6 +351,15 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
         fs::create_dir_all(&output)?;
     }
 
+    let cache_dir = dirs::DIR.cache_dir().join("thumbs");
+    if !cache_dir.exists() {
+        fs::create_dir_all(&cache_dir)?;
+    }
+
+    // Load database
+    let mut db = kr::db::SimpleJsonDatabase::new()
+        .map_err(|e| anyhow::anyhow!("Failed to load database: {}", e))?;
+
     let javdb = kl::javdb::JavdbScraper::new()?;
     let fc2 = kl::fc2::Fc2Scraper::new()?;
 
@@ -376,13 +386,35 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                             };
 
                         match scraper.scrape(&number) {
-                            Ok(movie) => {
+                            Ok(mut movie) => {
                                 println!("  Scraped: {}", movie.title);
 
-                                // Save NFO
+                                // Determine output directory based on actor count
+                                let movie_dir = if movie.actor.len() == 1 {
+                                    let actor_name =
+                                        movie.actor[0].name.replace("/", "_").replace("\\", "_");
+                                    output.join(actor_name).join(&number)
+                                } else {
+                                    output.join(&number)
+                                };
+
+                                if !movie_dir.exists() {
+                                    fs::create_dir_all(&movie_dir)?;
+                                }
+
+                                // 1. Move video file
+                                let ext = path.extension().unwrap_or_default().to_string_lossy();
+                                let video_filename = format!("{}.{}", number, ext);
+                                let video_dest = movie_dir.join(video_filename);
+                                match fs::rename(path, &video_dest) {
+                                    Ok(_) => println!("  Moved video to: {:?}", video_dest),
+                                    Err(e) => eprintln!("  Failed to move video: {}", e),
+                                }
+
+                                // 2. Save NFO
+                                let nfo_path = movie_dir.join(format!("{}.nfo", number));
                                 match kl::generate_nfo_xml(&movie) {
                                     Ok(xml) => {
-                                        let nfo_path = output.join(format!("{}.nfo", number));
                                         let mut file = fs::File::create(&nfo_path)?;
                                         file.write_all(xml.as_bytes())?;
                                         println!("  Saved NFO: {:?}", nfo_path);
@@ -390,32 +422,54 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                     Err(e) => eprintln!("  Error generating NFO: {}", e),
                                 }
 
-                                // Download images
+                                // 3. Download images
+                                let global_thumb_path = cache_dir.join(format!("{}.jpg", number));
+
                                 if let Some(poster_url) = &movie.poster {
-                                    if let Ok(response) = reqwest::blocking::get(poster_url) {
-                                        if let Ok(bytes) = response.bytes() {
-                                            let img_path =
-                                                output.join(format!("{}-poster.jpg", number));
-                                            if let Ok(mut file) = fs::File::create(&img_path) {
-                                                file.write_all(&bytes).ok();
-                                                println!("  Saved Poster: {:?}", img_path);
+                                    // Download poster to movie dir
+                                    let img_path = movie_dir.join(format!("{}-poster.jpg", number));
+                                    match reqwest::blocking::get(poster_url) {
+                                        Ok(response) => {
+                                            if let Ok(bytes) = response.bytes() {
+                                                if let Ok(mut file) = fs::File::create(&img_path) {
+                                                    file.write_all(&bytes).ok();
+                                                    println!("  Saved Poster: {:?}", img_path);
+
+                                                    // Copy to global cache
+                                                    if let Err(e) =
+                                                        fs::write(&global_thumb_path, &bytes)
+                                                    {
+                                                        eprintln!(
+                                                            "  Failed to write to cache: {}",
+                                                            e
+                                                        );
+                                                    } else {
+                                                        println!(
+                                                            "  Cached thumb: {:?}",
+                                                            global_thumb_path
+                                                        );
+                                                        // Update movie thumb to point to cache
+                                                        movie.thumb = Some(
+                                                            global_thumb_path
+                                                                .to_string_lossy()
+                                                                .to_string(),
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
+                                        Err(e) => eprintln!("  Failed to download poster: {}", e),
                                     }
                                 }
 
-                                if let Some(fanart_url) = &movie.fanart {
-                                    if let Ok(response) = reqwest::blocking::get(fanart_url) {
-                                        if let Ok(bytes) = response.bytes() {
-                                            let img_path =
-                                                output.join(format!("{}-fanart.jpg", number));
-                                            if let Ok(mut file) = fs::File::create(&img_path) {
-                                                file.write_all(&bytes).ok();
-                                                println!("  Saved Fanart: {:?}", img_path);
-                                            }
-                                        }
-                                    }
-                                }
+                                // Add to database
+                                let movie_data = kr::db::MovieData {
+                                    path: nfo_path,
+                                    movie,
+                                    added_time: std::time::SystemTime::now(),
+                                    fav: false,
+                                };
+                                db.config.movies.push(movie_data);
                             }
                             Err(e) => {
                                 eprintln!("  Scrape failed for {}: {}", number, e);
@@ -431,6 +485,9 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
             }
         }
     }
+
+    db.flush();
+    println!("Database flushed.");
 
     Ok(())
 }

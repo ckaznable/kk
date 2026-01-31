@@ -13,6 +13,7 @@ pub fn generate_nfo_xml(movie: &Movie) -> Result<String> {
     use quick_xml::se::to_string;
 
     #[derive(serde::Serialize)]
+    #[serde(rename = "movie")]
     struct Nfo {
         title: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,7 +79,7 @@ pub fn generate_nfo_xml(movie: &Movie) -> Result<String> {
 
     let xml = to_string(&nfo)?;
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<movie>\n{}\n</movie>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
         xml
     ))
 }

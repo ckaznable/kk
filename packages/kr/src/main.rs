@@ -14,14 +14,49 @@ struct Cli {
 enum Commands {
     /// cache data in config
     Cache,
+    /// remove duplicate nfo path records
+    Dedupe,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Cache) => cache(),
-        _ => Ok(())
+        Some(Commands::Dedupe) => dedupe(),
+        _ => Ok(()),
     }
+}
+
+fn dedupe() -> Result<()> {
+    let mut db = SimpleJsonDatabase::new()?;
+    let original_len = db.config.movies.len();
+    println!("Total records before dedupe: {}", original_len);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut unique_movies = Vec::with_capacity(original_len);
+    let mut removed_count = 0;
+
+    for movie in db.config.movies.drain(..) {
+        if seen.insert(movie.path.clone()) {
+            unique_movies.push(movie);
+        } else {
+            removed_count += 1;
+            println!("Duplicate removed: {:?}", movie.path);
+        }
+    }
+
+    if removed_count > 0 {
+        db.config.movies = unique_movies;
+        db.flush();
+        println!(
+            "Removed {} duplicate records. Database saved.",
+            removed_count
+        );
+    } else {
+        println!("No duplicates found.");
+    }
+
+    Ok(())
 }
 
 fn cache() -> Result<()> {
@@ -41,7 +76,13 @@ fn cache() -> Result<()> {
                 return;
             };
 
-            let name = path.parent().unwrap().file_name().unwrap().to_str().unwrap();
+            let name = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
             let filename = format!("{}.{}", name, ext.to_str().unwrap());
             let dst = cache_dir.join(filename);
             if dst.exists() {

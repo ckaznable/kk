@@ -408,7 +408,31 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                 let video_dest = movie_dir.join(video_filename);
                                 match fs::rename(path, &video_dest) {
                                     Ok(_) => println!("  Moved video to: {:?}", video_dest),
-                                    Err(e) => eprintln!("  Failed to move video: {}", e),
+                                    Err(e) => {
+                                        // Handle cross-device link error (Windows: 17, Unix: 18 usually)
+                                        // or other errors that might prevent atomic rename but allow copy
+                                        let raw_os_err = e.raw_os_error();
+                                        if raw_os_err == Some(17) || raw_os_err == Some(18) {
+                                            println!("  Cross-device link ({:?}), falling back to copy...", raw_os_err);
+                                            match fs::copy(path, &video_dest) {
+                                                Ok(_) => {
+                                                    if let Err(del_e) = fs::remove_file(path) {
+                                                        eprintln!("  Failed to delete source after copy: {}", del_e);
+                                                    } else {
+                                                        println!(
+                                                            "  Moved video to: {:?} (via copy)",
+                                                            video_dest
+                                                        );
+                                                    }
+                                                }
+                                                Err(copy_e) => {
+                                                    eprintln!("  Failed to copy video: {}", copy_e)
+                                                }
+                                            }
+                                        } else {
+                                            eprintln!("  Failed to move video: {}", e);
+                                        }
+                                    }
                                 }
 
                                 // 2. Save NFO
@@ -463,13 +487,21 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                 }
 
                                 // Add to database
-                                let movie_data = kr::db::MovieData {
-                                    path: nfo_path,
-                                    movie,
-                                    added_time: std::time::SystemTime::now(),
-                                    fav: false,
-                                };
-                                db.config.movies.push(movie_data);
+                                // Update or Add to database
+                                if let Some(idx) =
+                                    db.config.movies.iter().position(|m| m.path == nfo_path)
+                                {
+                                    println!("  Updating existing DB entry for: {:?}", nfo_path);
+                                    db.config.movies[idx].movie = movie;
+                                } else {
+                                    let movie_data = kr::db::MovieData {
+                                        path: nfo_path,
+                                        movie,
+                                        added_time: std::time::SystemTime::now(),
+                                        fav: false,
+                                    };
+                                    db.config.movies.push(movie_data);
+                                }
                             }
                             Err(e) => {
                                 eprintln!("  Scrape failed for {}: {}", number, e);

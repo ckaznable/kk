@@ -29,6 +29,6 @@ pub struct Actor {
     pub thumb: Option<String>,
 }
 
-pub fn init( ) -> SimpleJsonDatabase {
+pub fn init() -> SimpleJsonDatabase {
     SimpleJsonDatabase::default()
 }

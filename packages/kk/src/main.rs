@@ -205,7 +205,7 @@ fn main() {
             },
             Event::Push => {
                 let mouse_button = app::event_button();
-                
+
                 if in_video.get(){
                     if mouse_button == 3 {
                         // Right-click in video mode: exit to menu
@@ -220,7 +220,7 @@ fn main() {
                 } else {
                     // Handle mouse click in menu mode
                     let (x, y) = app::event_coords();
-                    
+
                     if mouse_button == 3 {
                         // Right-click on item: toggle favorite
                         if let Some(item_index) = menu.get_item_at_pos(x, y) {
@@ -238,7 +238,7 @@ fn main() {
                             draw_menu_with_mode(menu.clone(), db.clone(), menu.next_mode());
                             return true;
                         }
-                        
+
                         // Otherwise, check if clicking on item to play video
                         if let Some(item_index) = menu.get_item_at_pos(x, y) {
                             if let Some(data) = db.borrow().get_movie(item_index as usize) {
@@ -490,14 +490,22 @@ fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>
     };
 
     let items: Vec<_> = iter.flat_map(|item| item.try_into().ok()).collect();
-    println!("Mode: {} - Items count: {}", mode.display_name(), items.len());
-    
+    println!(
+        "Mode: {} - Items count: {}",
+        mode.display_name(),
+        items.len()
+    );
+
     menu.set_page(1);
     menu.set_item(items);
     menu.draw();
 }
 
-fn redraw_menu_keep_page(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>, mode: MenuMode) {
+fn redraw_menu_keep_page(
+    mut menu: BrowseMenu,
+    db: Rc<RefCell<SimpleJsonDatabase>>,
+    mode: MenuMode,
+) {
     let current_page = menu.current_page();
     let mut db = db.borrow_mut();
     let iter = match mode {
@@ -507,7 +515,7 @@ fn redraw_menu_keep_page(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase
     };
 
     let items: Vec<_> = iter.flat_map(|item| item.try_into().ok()).collect();
-    
+
     menu.set_page(current_page);
     menu.set_item(items);
     menu.draw();

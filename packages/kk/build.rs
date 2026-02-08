@@ -8,7 +8,7 @@ fn main() {
 
     let dll_name = "libmpv-2.dll";
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    
+
     let mut executable_path = out_dir.clone();
     executable_path.pop();
     executable_path.pop();

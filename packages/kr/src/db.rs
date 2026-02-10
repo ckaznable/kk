@@ -232,6 +232,30 @@ impl SimpleJsonDatabase {
         }
         false
     }
+
+    /// Get the list of actor names for a movie at the given index
+    pub fn get_actors(&self, i: usize) -> Vec<String> {
+        self.config
+            .movies
+            .get(i)
+            .map(|m| m.movie.actor.iter().map(|a| a.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Filter movies by actor name
+    pub fn filter_by_actor<'a>(&'a self, actor_name: &str) -> Vec<u32> {
+        self.index_ref
+            .iter()
+            .copied()
+            .filter(|i| {
+                self.config
+                    .movies
+                    .get(*i as usize)
+                    .map(|d| d.movie.actor.iter().any(|a| a.name == actor_name))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]

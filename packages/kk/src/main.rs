@@ -4,6 +4,7 @@ use fltk::{
     app,
     enums::{Color, Cursor, Event, Key},
     group::{Group, Wizard},
+    menu,
     prelude::{GroupExt, WidgetBase, WidgetExt, WindowExt},
     window::{GlWindow, Window},
 };
@@ -222,13 +223,45 @@ fn main() {
                     let (x, y) = app::event_coords();
 
                     if mouse_button == 3 {
-                        // Right-click on item: toggle favorite
+                        // Right-click on item: show context menu
                         if let Some(item_index) = menu.get_item_at_pos(x, y) {
-                            let new_fav_status = db.borrow_mut().toggle_fav(item_index as usize);
-                            db.borrow().flush(); // Save the changes to disk
-                            // Reload menu data to update the heart icon, keeping current page
-                            redraw_menu_keep_page(menu.clone(), db.clone(), menu.current_mode());
-                            println!("Item {} favorite status toggled: {}", item_index, new_fav_status);
+                            let is_fav = db.borrow().get_movie(item_index as usize).map(|m| m.fav).unwrap_or(false);
+                            let actors = db.borrow().get_actors(item_index as usize);
+
+                            // Step 1: Show main context menu with static labels
+                            let main_items = if is_fav {
+                                menu::MenuItem::new(&["Unfavorite", "Actors"])
+                            } else {
+                                menu::MenuItem::new(&["Favorite", "Actors"])
+                            };
+
+                            if let Some(val) = main_items.popup(x, y) {
+                                let label = val.label().unwrap_or_default();
+                                if label == "Favorite" || label == "Unfavorite" {
+                                    let new_fav_status = db.borrow_mut().toggle_fav(item_index as usize);
+                                    db.borrow().flush();
+                                    redraw_menu_keep_page(menu.clone(), db.clone(), menu.current_mode());
+                                    println!("Item {} favorite status toggled: {}", item_index, new_fav_status);
+                                } else if label == "Actors" {
+                                    if actors.len() == 1 {
+                                        // Single actor: directly filter
+                                        let actor_mode = MenuMode::Actor(actors[0].clone());
+                                        draw_menu_with_mode(menu.clone(), db.clone(), actor_mode);
+                                    } else if actors.len() > 1 {
+                                        // Leak strings to get 'static refs for MenuItem::new
+                                        let static_refs: Vec<&'static str> = actors.iter()
+                                            .map(|s| &*Box::leak(s.clone().into_boxed_str()))
+                                            .collect();
+                                        let actor_menu = menu::MenuItem::new(&static_refs);
+                                        if let Some(val) = actor_menu.popup(x, y) {
+                                            if let Some(name) = val.label() {
+                                                let actor_mode = MenuMode::Actor(name);
+                                                draw_menu_with_mode(menu.clone(), db.clone(), actor_mode);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             return true;
                         }
                     } else {
@@ -308,8 +341,12 @@ fn main() {
                         true
                     }
                     Key::BackSpace => {
-                        menu.pop_symbol();
-                        menu.draw();
+                        if matches!(menu.current_mode(), MenuMode::Actor(_)) {
+                            draw_menu_with_mode(menu.clone(), db.clone(), MenuMode::AddedTime);
+                        } else {
+                            menu.pop_symbol();
+                            menu.draw();
+                        }
                         true
                     }
                     k if k == Key::from_char('s') && !in_video.get() => {
@@ -442,12 +479,6 @@ fn main() {
             FullScreen(v) => {
                 let is_fullscreen = v.unwrap_or(!win.fullscreen_active());
                 win.fullscreen(is_fullscreen);
-
-                if is_fullscreen {
-                    win.set_cursor(Cursor::None);
-                } else {
-                    win.set_cursor(Cursor::Default);
-                }
             }
             SetCusor(cursor) => {
                 if in_video.get() {
@@ -482,14 +513,33 @@ fn mpv_property(mpv: &Mpv) {
 }
 
 fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>, mode: MenuMode) {
-    let mut db = db.borrow_mut();
-    let iter = match mode {
-        MenuMode::AddedTime => db.order_by_added_time(),
-        MenuMode::Random => db.order_by_random(),
-        MenuMode::Fav => db.filter_by_fav(),
+    menu.set_mode(mode.clone());
+    let db_ref = db.borrow_mut();
+    let items: Vec<_> = match &mode {
+        MenuMode::Actor(actor_name) => {
+            let indices = db_ref.filter_by_actor(actor_name);
+            indices
+                .iter()
+                .filter_map(|&i| {
+                    db_ref.get_movie(i as usize).and_then(|movie| {
+                        kr::db::IndexedMovieData { movie, index: i }.try_into().ok()
+                    })
+                })
+                .collect()
+        }
+        _ => {
+            drop(db_ref);
+            let mut db_ref = db.borrow_mut();
+            let iter = match mode {
+                MenuMode::AddedTime => db_ref.order_by_added_time(),
+                MenuMode::Random => db_ref.order_by_random(),
+                MenuMode::Fav => db_ref.filter_by_fav(),
+                MenuMode::Actor(_) => unreachable!(),
+            };
+            iter.flat_map(|item| item.try_into().ok()).collect()
+        }
     };
 
-    let items: Vec<_> = iter.flat_map(|item| item.try_into().ok()).collect();
     println!(
         "Mode: {} - Items count: {}",
         mode.display_name(),
@@ -507,14 +557,31 @@ fn redraw_menu_keep_page(
     mode: MenuMode,
 ) {
     let current_page = menu.current_page();
-    let mut db = db.borrow_mut();
-    let iter = match mode {
-        MenuMode::AddedTime => db.order_by_added_time(),
-        MenuMode::Random => db.order_by_random(),
-        MenuMode::Fav => db.filter_by_fav(),
+    let db_ref = db.borrow_mut();
+    let items: Vec<_> = match &mode {
+        MenuMode::Actor(actor_name) => {
+            let indices = db_ref.filter_by_actor(actor_name);
+            indices
+                .iter()
+                .filter_map(|&i| {
+                    db_ref.get_movie(i as usize).and_then(|movie| {
+                        kr::db::IndexedMovieData { movie, index: i }.try_into().ok()
+                    })
+                })
+                .collect()
+        }
+        _ => {
+            drop(db_ref);
+            let mut db_ref = db.borrow_mut();
+            let iter = match mode {
+                MenuMode::AddedTime => db_ref.order_by_added_time(),
+                MenuMode::Random => db_ref.order_by_random(),
+                MenuMode::Fav => db_ref.filter_by_fav(),
+                MenuMode::Actor(_) => unreachable!(),
+            };
+            iter.flat_map(|item| item.try_into().ok()).collect()
+        }
     };
-
-    let items: Vec<_> = iter.flat_map(|item| item.try_into().ok()).collect();
 
     menu.set_page(current_page);
     menu.set_item(items);

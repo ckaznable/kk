@@ -27,20 +27,22 @@ const MENU_IMG_WIDTH: i32 = 312;
 
 const ITEM_GAP: i32 = 8;
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub enum MenuMode {
     #[default]
     AddedTime,
     Random,
     Fav,
+    Actor(String),
 }
 
 impl MenuMode {
-    pub fn display_name(&self) -> &str {
+    pub fn display_name(&self) -> String {
         match self {
-            MenuMode::AddedTime => "Recent",
-            MenuMode::Random => "Random",
-            MenuMode::Fav => "Favorites",
+            MenuMode::AddedTime => "Recent".to_string(),
+            MenuMode::Random => "Random".to_string(),
+            MenuMode::Fav => "Favorites".to_string(),
+            MenuMode::Actor(name) => format!("Actor: {}", name),
         }
     }
 }
@@ -193,7 +195,7 @@ pub struct BrowseMenu {
     symbols: Rc<Vec<String>>,
     symbol: Rc<RefCell<String>>,
     page_index_list: Rc<RefCell<Vec<u32>>>,
-    mode: Rc<Cell<MenuMode>>,
+    mode: Rc<RefCell<MenuMode>>,
 }
 
 impl BrowseMenu {
@@ -225,13 +227,13 @@ impl BrowseMenu {
             w.draw_children();
         });
 
-        let mode = Rc::new(Cell::new(MenuMode::default()));
+        let mode = Rc::new(RefCell::new(MenuMode::default()));
 
         g.resize_callback(enclose!((items, page, symbols, symbol, page_path_list, mode) move |w, _x, _y, _width, _height| {
             let page_size = Self::page_size(w);
             let total_items = items.borrow().len();
             let total_pages = if total_items == 0 { 1 } else { (total_items + page_size - 1) / page_size };
-            *page_path_list.borrow_mut() = Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow(), mode.get(), total_pages);
+            *page_path_list.borrow_mut() = Self::draw_items(w, &items.borrow(), page.get(), &symbols, &symbol.borrow(), mode.borrow().clone(), total_pages);
         }));
 
         Self {
@@ -246,7 +248,7 @@ impl BrowseMenu {
     }
 
     pub fn draw(&mut self) {
-        let mode = self.mode.get();
+        let mode = self.mode.borrow().clone();
         let page = self.page.get();
         let page_size = Self::page_size(&self.g);
         let total_items = self.items.borrow().len();
@@ -344,29 +346,35 @@ impl BrowseMenu {
 
     pub fn next_mode(&self) -> MenuMode {
         use MenuMode::*;
-        let mode = match self.mode.get() {
+        let mode = match *self.mode.borrow() {
             AddedTime => Random,
             Random => Fav,
             Fav => AddedTime,
+            Actor(_) => AddedTime,
         };
 
-        self.mode.set(mode);
+        *self.mode.borrow_mut() = mode.clone();
         mode
     }
 
     pub fn current_mode(&self) -> MenuMode {
-        self.mode.get()
+        self.mode.borrow().clone()
+    }
+
+    pub fn set_mode(&self, mode: MenuMode) {
+        *self.mode.borrow_mut() = mode;
     }
 
     pub fn prev_mode(&self) -> MenuMode {
         use MenuMode::*;
-        let mode = match self.mode.get() {
+        let mode = match *self.mode.borrow() {
             AddedTime => Fav,
             Random => AddedTime,
             Fav => Random,
+            Actor(_) => AddedTime,
         };
 
-        self.mode.set(mode);
+        *self.mode.borrow_mut() = mode.clone();
         mode
     }
 

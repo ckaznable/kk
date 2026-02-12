@@ -489,6 +489,8 @@ fn main() {
                 in_video.set(false);
                 current_movie_index.set(None);
                 mpv_tx.send(MpvEvent::Stop).ok();
+                // Redraw menu to pick up any marker/fav changes made during video playback
+                redraw_menu_keep_page(menu.clone(), db.clone(), menu.current_mode());
             }
             FullScreen(v) => {
                 let is_fullscreen = v.unwrap_or(!win.fullscreen_active());
@@ -501,12 +503,16 @@ fn main() {
             }
             AddMarker(time) => {
                 if let Some(idx) = current_movie_index.get() {
-                    db.borrow_mut().add_marker(idx, time);
+                    let added = db.borrow_mut().add_marker(idx, time);
                     db.borrow().flush();
                     // Send updated markers to mpv for display
                     let markers = db.borrow().get_markers(idx);
                     mpv_tx.send(MpvEvent::SetMarker(markers)).ok();
-                    println!("Marker added at {:.1}s for movie index {}", time, idx);
+                    if added {
+                        println!("Marker added at {:.1}s for movie index {}", time, idx);
+                    } else {
+                        println!("Marker removed at {:.1}s for movie index {}", time, idx);
+                    }
                 }
             }
             End => break,
@@ -558,6 +564,7 @@ fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>
                 MenuMode::AddedTime => db_ref.order_by_added_time(),
                 MenuMode::Random => db_ref.order_by_random(),
                 MenuMode::Fav => db_ref.filter_by_fav(),
+                MenuMode::Marked => db_ref.filter_by_marked(),
                 MenuMode::Actor(_) => unreachable!(),
             };
             iter.flat_map(|item| item.try_into().ok()).collect()
@@ -601,6 +608,7 @@ fn redraw_menu_keep_page(
                 MenuMode::AddedTime => db_ref.order_by_added_time(),
                 MenuMode::Random => db_ref.order_by_random(),
                 MenuMode::Fav => db_ref.filter_by_fav(),
+                MenuMode::Marked => db_ref.filter_by_marked(),
                 MenuMode::Actor(_) => unreachable!(),
             };
             iter.flat_map(|item| item.try_into().ok()).collect()

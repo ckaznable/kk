@@ -33,6 +33,7 @@ pub enum MenuMode {
     AddedTime,
     Random,
     Fav,
+    Marked,
     Actor(String),
 }
 
@@ -42,6 +43,7 @@ impl MenuMode {
             MenuMode::AddedTime => "Recent".to_string(),
             MenuMode::Random => "Random".to_string(),
             MenuMode::Fav => "Favorites".to_string(),
+            MenuMode::Marked => "Marked".to_string(),
             MenuMode::Actor(name) => format!("Actor: {}", name),
         }
     }
@@ -349,7 +351,8 @@ impl BrowseMenu {
         let mode = match *self.mode.borrow() {
             AddedTime => Random,
             Random => Fav,
-            Fav => AddedTime,
+            Fav => Marked,
+            Marked => AddedTime,
             Actor(_) => AddedTime,
         };
 
@@ -368,9 +371,10 @@ impl BrowseMenu {
     pub fn prev_mode(&self) -> MenuMode {
         use MenuMode::*;
         let mode = match *self.mode.borrow() {
-            AddedTime => Fav,
+            AddedTime => Marked,
             Random => AddedTime,
             Fav => Random,
+            Marked => Fav,
             Actor(_) => AddedTime,
         };
 

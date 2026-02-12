@@ -59,6 +59,7 @@ pub struct SimpleJsonDatabase {
     order_by_fav_index: IndexCacheTable,
     order_by_added_time_index: IndexCacheTable,
     order_by_random_index: IndexCacheTable,
+    order_by_marked_index: IndexCacheTable,
 }
 
 impl Default for SimpleJsonDatabase {
@@ -72,6 +73,7 @@ impl Default for SimpleJsonDatabase {
             order_by_fav_index: IndexCacheTable::default(),
             order_by_added_time_index: IndexCacheTable::default(),
             order_by_random_index: IndexCacheTable::default(),
+            order_by_marked_index: IndexCacheTable::default(),
         }
     }
 }
@@ -153,6 +155,7 @@ impl SimpleJsonDatabase {
             self.order_by_fav_index.dirty = true;
             self.order_by_added_time_index.dirty = true;
             self.order_by_random_index.dirty = true;
+            self.order_by_marked_index.dirty = true;
             self.index_ref = (0..self.config.movies.len() as u32).collect();
         }
     }
@@ -186,6 +189,31 @@ impl SimpleJsonDatabase {
             .collect();
 
         let index = self.order_by_fav_index.idx.insert(data);
+        DatabaseSlice::new(&self.config.movies, index)
+    }
+
+    pub fn filter_by_marked<'a>(&'a mut self) -> DatabaseSlice<'a> {
+        if !self.order_by_marked_index.dirty
+            && let Some(ref idx) = self.order_by_marked_index.idx
+        {
+            return DatabaseSlice::new(&self.config.movies, idx);
+        }
+
+        self.order_by_marked_index.dirty = false;
+        let data: Vec<u32> = self
+            .index_ref
+            .iter()
+            .copied()
+            .filter(|i| {
+                self.config
+                    .movies
+                    .get(*i as usize)
+                    .map(|d| !d.markers.is_empty())
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let index = self.order_by_marked_index.idx.insert(data);
         DatabaseSlice::new(&self.config.movies, index)
     }
 
@@ -269,18 +297,27 @@ impl SimpleJsonDatabase {
             .unwrap_or_default()
     }
 
-    /// Add a marker (timestamp) to a movie at the given index
-    pub fn add_marker(&mut self, i: usize, time: f64) {
+    /// Add or remove a marker (timestamp) for a movie at the given index.
+    /// If the new marker is within 1 second of an existing marker, the existing
+    /// marker is removed (toggle behavior). Otherwise the new marker is added.
+    pub fn add_marker(&mut self, i: usize, time: f64) -> bool {
         if let Some(movie) = self.config.movies.get_mut(i) {
-            // Avoid duplicate markers (within 0.5s tolerance)
-            let already_exists = movie.markers.iter().any(|&m| (m - time).abs() < 0.5);
-            if !already_exists {
-                movie.markers.push(time);
-                movie
-                    .markers
-                    .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // Check if there's an existing marker within 1 second
+            if let Some(pos) = movie.markers.iter().position(|&m| (m - time).abs() < 1.0) {
+                // Toggle: remove the existing marker
+                movie.markers.remove(pos);
+                self.order_by_marked_index.dirty = true;
+                return false; // marker removed
             }
+
+            movie.markers.push(time);
+            movie
+                .markers
+                .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            self.order_by_marked_index.dirty = true;
+            return true; // marker added
         }
+        false
     }
 }
 

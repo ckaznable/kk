@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dirs::DIR;
 use kr::db::SimpleJsonDatabase;
+use std::collections::HashMap;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -16,6 +17,8 @@ enum Commands {
     Cache,
     /// remove duplicate nfo path records
     Dedupe,
+    /// find movies with duplicate num (番號) and list their absolute paths
+    DupNum,
 }
 
 fn main() -> Result<()> {
@@ -23,6 +26,7 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Cache) => cache(),
         Some(Commands::Dedupe) => dedupe(),
+        Some(Commands::DupNum) => dup_num(),
         _ => Ok(()),
     }
 }
@@ -98,5 +102,61 @@ fn cache() -> Result<()> {
         });
 
     db.flush();
+    Ok(())
+}
+
+fn dup_num() -> Result<()> {
+    let db = SimpleJsonDatabase::new()?;
+    let mut num_map: HashMap<String, Vec<String>> = HashMap::new();
+
+    for movie in &db.config.movies {
+        let Some(stem) = movie.path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+
+        let stem_lower = stem.to_lowercase();
+
+        // Skip multi-disc entries (filename ending with -cd1, _CD2, etc.)
+        if let Some(pos) = stem_lower.rfind("cd") {
+            let after_cd = &stem_lower[pos + 2..];
+            if !after_cd.is_empty() && after_cd.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+        }
+
+        let abs_path = if movie.path.is_absolute() {
+            movie.path.to_string_lossy().to_string()
+        } else {
+            std::fs::canonicalize(&movie.path)
+                .unwrap_or(movie.path.clone())
+                .to_string_lossy()
+                .to_string()
+        };
+
+        num_map.entry(stem_lower).or_default().push(abs_path);
+    }
+
+    let mut dup_count = 0;
+    let mut sorted: Vec<_> = num_map
+        .iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .collect();
+    sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    for (num, paths) in &sorted {
+        dup_count += 1;
+        println!("[{}] ({} duplicates)", num, paths.len());
+        for p in *paths {
+            println!("  {}", p);
+        }
+        println!();
+    }
+
+    if dup_count == 0 {
+        println!("No duplicate numbers found.");
+    } else {
+        println!("Found {} duplicate number(s).", dup_count);
+    }
+
     Ok(())
 }

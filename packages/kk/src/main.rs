@@ -26,7 +26,7 @@ const INIT_WIN_HEIGHT: i32 = 720;
 #[derive(Clone, Debug)]
 enum AppHandleEvent {
     TimePosUpdated(f64),
-    GoToVideo(String, usize, Option<Vec<f64>>),
+    GoToVideo(String, usize, Vec<f64>),
     GoToMenu,
     FullScreen(Option<bool>),
     SetCusor(Cursor),
@@ -280,22 +280,8 @@ fn main() {
 
                         // Otherwise, check if clicking on item to play video
                         if let Some(item_index) = menu.get_item_at_pos(x, y) {
-                            if let Some(data) = db.borrow().get_movie(item_index as usize) {
-                                let parent = data.path.parent().unwrap();
-                                let filename = data.path.file_prefix().unwrap().to_str().unwrap();
-                                let markers = db.borrow().get_markers(item_index as usize);
-                                let markers_opt = if markers.is_empty() { None } else { Some(markers) };
-
-                                for ext in ["mp4", "mkv", "avi", "rmvb"] {
-                                    let p = parent.join(format!("{filename}.{ext}"));
-                                    if p.exists() {
-                                        println!("playing {:?}", &p);
-                                        app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), item_index as usize, markers_opt));
-                                        return true;
-                                    }
-                                }
-
-                                println!("{parent:?} {filename} video file not found");
+                            if try_play_video(&db, item_index as usize, &app_tx) {
+                                return true;
                             }
                         }
                     }
@@ -327,22 +313,10 @@ fn main() {
                 let key = app::event_key();
                 return match key {
                     Key::Enter => {
-                        if let Some(i) = menu.page_first_item_path() && let Some(data) = db.borrow().get_movie(i as usize) {
-                            let parent = data.path.parent().unwrap();
-                            let filename = data.path.file_prefix().unwrap().to_str().unwrap();
-                            let markers = db.borrow().get_markers(i as usize);
-                            let markers_opt = if markers.is_empty() { None } else { Some(markers) };
-
-                            for ext in ["mp4", "mkv", "avi", "rmvb"] {
-                                let p = parent.join(format!("{filename}.{ext}"));
-                                if p.exists() {
-                                    println!("playing {:?}", &p);
-                                    app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), i as usize, markers_opt));
-                                    return true;
-                                }
+                        if let Some(i) = menu.page_first_item_path() {
+                            if try_play_video(&db, i as usize, &app_tx) {
+                                return true;
                             }
-
-                            println!("{parent:?} {filename} video file not found");
                         }
                         false
                     }
@@ -475,14 +449,12 @@ fn main() {
         use AppHandleEvent::*;
         match ev {
             TimePosUpdated(_new_time) => {}
-            GoToVideo(p, movie_idx, m) => {
+            GoToVideo(p, movie_idx, markers) => {
                 in_video.set(true);
                 current_movie_index.set(Some(movie_idx));
                 wizard.set_current_widget(&video_group);
                 mpv_tx.send(MpvEvent::LoadFile(p)).ok();
-                if let Some(m) = m {
-                    mpv_tx.send(MpvEvent::SetMarker(m)).ok();
-                }
+                mpv_tx.send(MpvEvent::SetMarker(markers)).ok();
             }
             GoToMenu => {
                 wizard.set_current_widget(&menu.g);
@@ -542,10 +514,48 @@ fn mpv_property(mpv: &Mpv) {
     mpv.observe_property("duration", Format::Double, 1).unwrap();
 }
 
-fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>, mode: MenuMode) {
-    menu.set_mode(mode.clone());
+/// Try to find and play a video file for the movie at the given db index.
+/// Returns true if a video file was found and the GoToVideo event was sent.
+fn try_play_video(
+    db: &Rc<RefCell<SimpleJsonDatabase>>,
+    movie_index: usize,
+    app_tx: &app::Sender<AppHandleEvent>,
+) -> bool {
+    let db_ref = db.borrow();
+    let Some(data) = db_ref.get_movie(movie_index) else {
+        return false;
+    };
+
+    let parent = data.path.parent().unwrap();
+    let filename = data.path.file_prefix().unwrap().to_str().unwrap();
+    let markers = db_ref.get_markers(movie_index);
+
+    for ext in [
+        "mp4", "mkv", "avi", "rmvb", "wmv", "mov", "flv", "webm", "ts", "m4v", "3gp",
+    ] {
+        let p = parent.join(format!("{filename}.{ext}"));
+        if p.exists() {
+            println!("playing {:?}", &p);
+            app_tx.send(AppHandleEvent::GoToVideo(
+                p.to_string_lossy().to_string(),
+                movie_index,
+                markers,
+            ));
+            return true;
+        }
+    }
+
+    println!("{parent:?} {filename} video file not found");
+    false
+}
+
+/// Query menu items from the database based on the given mode.
+fn query_menu_items(
+    db: &Rc<RefCell<SimpleJsonDatabase>>,
+    mode: &MenuMode,
+) -> Vec<crate::ui::browse::RenderItem> {
     let db_ref = db.borrow_mut();
-    let items: Vec<_> = match &mode {
+    match mode {
         MenuMode::Actor(actor_name) => {
             let indices = db_ref.filter_by_actor(actor_name);
             indices
@@ -569,7 +579,12 @@ fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>
             };
             iter.flat_map(|item| item.try_into().ok()).collect()
         }
-    };
+    }
+}
+
+fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<SimpleJsonDatabase>>, mode: MenuMode) {
+    menu.set_mode(mode.clone());
+    let items = query_menu_items(&db, &mode);
 
     println!(
         "Mode: {} - Items count: {}",
@@ -588,32 +603,7 @@ fn redraw_menu_keep_page(
     mode: MenuMode,
 ) {
     let current_page = menu.current_page();
-    let db_ref = db.borrow_mut();
-    let items: Vec<_> = match &mode {
-        MenuMode::Actor(actor_name) => {
-            let indices = db_ref.filter_by_actor(actor_name);
-            indices
-                .iter()
-                .filter_map(|&i| {
-                    db_ref.get_movie(i as usize).and_then(|movie| {
-                        kr::db::IndexedMovieData { movie, index: i }.try_into().ok()
-                    })
-                })
-                .collect()
-        }
-        _ => {
-            drop(db_ref);
-            let mut db_ref = db.borrow_mut();
-            let iter = match mode {
-                MenuMode::AddedTime => db_ref.order_by_added_time(),
-                MenuMode::Random => db_ref.order_by_random(),
-                MenuMode::Fav => db_ref.filter_by_fav(),
-                MenuMode::Marked => db_ref.filter_by_marked(),
-                MenuMode::Actor(_) => unreachable!(),
-            };
-            iter.flat_map(|item| item.try_into().ok()).collect()
-        }
-    };
+    let items = query_menu_items(&db, &mode);
 
     menu.set_page(current_page);
     menu.set_item(items);

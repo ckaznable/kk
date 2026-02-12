@@ -220,6 +220,23 @@ mp.add_forced_key_binding("MBTN_LEFT", "click_seek", function()
     on_mouse_click()
 end)
 
+-- Scroll wheel: seek forward/backward
+mp.add_forced_key_binding("WHEEL_UP", "wheel_seek_back", function()
+    mp.commandv("seek", "-5", "relative")
+    reset_activity()
+end)
+
+mp.add_forced_key_binding("WHEEL_DOWN", "wheel_seek_fwd", function()
+    mp.commandv("seek", "5", "relative")
+    reset_activity()
+end)
+
+-- Middle click: jump to next marker
+mp.add_forced_key_binding("MBTN_MID", "middle_click_jump", function()
+    jump_next_marker()
+    reset_activity()
+end)
+
 mp.observe_property("mouse-pos", "native", reset_activity)
 mp.observe_property("time-pos", "number", draw_ui)
 mp.observe_property("osd-dimensions", "native", draw_ui)

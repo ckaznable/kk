@@ -45,6 +45,7 @@ enum MpvEvent {
     MouseMove(i32, i32),
     MouseClick(i32, i32),
     SeekRelative(i32),
+    VolumeAdjust(i32),
 }
 
 fn main() {
@@ -185,6 +186,12 @@ fn main() {
                     SeekRelative(s) => {
                         mpv.command("seek", &[&s.to_string(), "relative"]).ok();
                     }
+                    VolumeAdjust(delta) => {
+                        mpv.command("add", &["volume", &delta.to_string()]).ok();
+                        if let Ok(vol) = mpv.get_property::<i64>("volume") {
+                            mpv.command("show-text", &[&format!("Volume: {}%", vol), "1000"]).ok();
+                        }
+                    }
                 }
             }
         }
@@ -217,6 +224,10 @@ fn main() {
                     if mouse_button == 3 {
                         // Right-click in video mode: exit to menu
                         app_tx.send(AppHandleEvent::GoToMenu);
+                        return true;
+                    } else if mouse_button == 2 {
+                        // Middle-click: jump to next marker
+                        mpv_tx.send(MpvEvent::JumpNextMarker).ok();
                         return true;
                     } else {
                         // Left-click: send to MPV
@@ -289,17 +300,27 @@ fn main() {
                 false
             }
             Event::MouseWheel => {
-                // Handle mouse wheel scrolling in menu mode for page navigation
-                if !in_video.get() {
-                    use fltk::app::MouseWheel;
+                use fltk::app::MouseWheel;
+                if in_video.get() {
+                    // Scroll in video mode: seek forward/backward
                     match app::event_dy() {
                         MouseWheel::Up => {
-                            // Scroll up - go to previous page
+                            mpv_tx.send(MpvEvent::SeekRelative(-5)).ok();
+                        }
+                        MouseWheel::Down => {
+                            mpv_tx.send(MpvEvent::SeekRelative(5)).ok();
+                        }
+                        _ => {}
+                    }
+                    return true;
+                } else {
+                    // Scroll in menu mode: page navigation
+                    match app::event_dy() {
+                        MouseWheel::Up => {
                             menu.prev_page();
                             menu.draw();
                         }
                         MouseWheel::Down => {
-                            // Scroll down - go to next page
                             menu.next_page();
                             menu.draw();
                         }
@@ -307,7 +328,6 @@ fn main() {
                     }
                     return true;
                 }
-                false
             }
             Event::KeyDown|Event::Shortcut => {
                 let key = app::event_key();
@@ -426,6 +446,14 @@ fn main() {
                     }
                     k if k == Key::from_char(' ') && in_video.get() => {
                         mpv_tx.send(MpvEvent::TogglePause).ok();
+                        true
+                    }
+                    Key::Up if in_video.get() => {
+                        mpv_tx.send(MpvEvent::VolumeAdjust(5)).ok();
+                        true
+                    }
+                    Key::Down if in_video.get() => {
+                        mpv_tx.send(MpvEvent::VolumeAdjust(-5)).ok();
                         true
                     }
                     k if k == Key::from_char('b') && !in_video.get() => {

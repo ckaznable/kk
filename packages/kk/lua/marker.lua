@@ -195,7 +195,12 @@ local function jump_next_marker()
             return
         end
     end
-    mp.osd_message("No next marker")
+    -- Loop back to first marker
+    local first = tonumber(markers[1])
+    if first then
+        mp.set_property_number("time-pos", first)
+        mp.osd_message("Jump: " .. string.format("%.1f (loop)", first))
+    end
 end
 
 mp.add_key_binding("n", "jump_next", jump_next_marker)

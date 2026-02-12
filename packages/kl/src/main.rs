@@ -499,6 +499,7 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                         movie,
                                         added_time: std::time::SystemTime::now(),
                                         fav: false,
+                                        markers: Vec::new(),
                                     };
                                     db.config.movies.push(movie_data);
                                 }

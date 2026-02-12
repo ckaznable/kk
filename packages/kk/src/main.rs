@@ -26,10 +26,11 @@ const INIT_WIN_HEIGHT: i32 = 720;
 #[derive(Clone, Debug)]
 enum AppHandleEvent {
     TimePosUpdated(f64),
-    GoToVideo(String, Option<Vec<f64>>),
+    GoToVideo(String, usize, Option<Vec<f64>>),
     GoToMenu,
     FullScreen(Option<bool>),
     SetCusor(Cursor),
+    AddMarker(f64),
     End,
 }
 
@@ -117,7 +118,12 @@ fn main() {
                                 app_tx.send(AppHandleEvent::SetCusor(cursor));
                             }
                             "rust_add_marker" => {
-                                // todo
+                                if args.len() > 1 {
+                                    if let Ok(time) = args[1].parse::<f64>() {
+                                        // Send add_marker event back so it can be handled on the main thread
+                                        app_tx.send(AppHandleEvent::AddMarker(time));
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -277,12 +283,14 @@ fn main() {
                             if let Some(data) = db.borrow().get_movie(item_index as usize) {
                                 let parent = data.path.parent().unwrap();
                                 let filename = data.path.file_prefix().unwrap().to_str().unwrap();
+                                let markers = db.borrow().get_markers(item_index as usize);
+                                let markers_opt = if markers.is_empty() { None } else { Some(markers) };
 
                                 for ext in ["mp4", "mkv", "avi", "rmvb"] {
                                     let p = parent.join(format!("{filename}.{ext}"));
                                     if p.exists() {
                                         println!("playing {:?}", &p);
-                                        app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), None));
+                                        app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), item_index as usize, markers_opt));
                                         return true;
                                     }
                                 }
@@ -322,12 +330,14 @@ fn main() {
                         if let Some(i) = menu.page_first_item_path() && let Some(data) = db.borrow().get_movie(i as usize) {
                             let parent = data.path.parent().unwrap();
                             let filename = data.path.file_prefix().unwrap().to_str().unwrap();
+                            let markers = db.borrow().get_markers(i as usize);
+                            let markers_opt = if markers.is_empty() { None } else { Some(markers) };
 
                             for ext in ["mp4", "mkv", "avi", "rmvb"] {
                                 let p = parent.join(format!("{filename}.{ext}"));
                                 if p.exists() {
                                     println!("playing {:?}", &p);
-                                    app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), None));
+                                    app_tx.send(AppHandleEvent::GoToVideo(p.to_string_lossy().to_string(), i as usize, markers_opt));
                                     return true;
                                 }
                             }
@@ -455,6 +465,8 @@ fn main() {
         }
     }));
 
+    let current_movie_index: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+
     while app.wait() {
         let Some(ev) = app_rx.recv() else {
             continue;
@@ -463,8 +475,9 @@ fn main() {
         use AppHandleEvent::*;
         match ev {
             TimePosUpdated(_new_time) => {}
-            GoToVideo(p, m) => {
+            GoToVideo(p, movie_idx, m) => {
                 in_video.set(true);
+                current_movie_index.set(Some(movie_idx));
                 wizard.set_current_widget(&video_group);
                 mpv_tx.send(MpvEvent::LoadFile(p)).ok();
                 if let Some(m) = m {
@@ -474,6 +487,7 @@ fn main() {
             GoToMenu => {
                 wizard.set_current_widget(&menu.g);
                 in_video.set(false);
+                current_movie_index.set(None);
                 mpv_tx.send(MpvEvent::Stop).ok();
             }
             FullScreen(v) => {
@@ -483,6 +497,16 @@ fn main() {
             SetCusor(cursor) => {
                 if in_video.get() {
                     win.set_cursor(cursor);
+                }
+            }
+            AddMarker(time) => {
+                if let Some(idx) = current_movie_index.get() {
+                    db.borrow_mut().add_marker(idx, time);
+                    db.borrow().flush();
+                    // Send updated markers to mpv for display
+                    let markers = db.borrow().get_markers(idx);
+                    mpv_tx.send(MpvEvent::SetMarker(markers)).ok();
+                    println!("Marker added at {:.1}s for movie index {}", time, idx);
                 }
             }
             End => break,

@@ -48,6 +48,8 @@ pub struct MovieData {
     pub movie: Movie,
     pub added_time: SystemTime,
     pub fav: bool,
+    #[serde(default)]
+    pub markers: Vec<f64>,
 }
 
 #[derive(Debug)]
@@ -130,6 +132,7 @@ impl SimpleJsonDatabase {
             movie,
             added_time,
             fav: false,
+            markers: Vec::new(),
         })
     }
 
@@ -255,6 +258,29 @@ impl SimpleJsonDatabase {
                     .unwrap_or(false)
             })
             .collect()
+    }
+
+    /// Get the markers for a movie at the given index
+    pub fn get_markers(&self, i: usize) -> Vec<f64> {
+        self.config
+            .movies
+            .get(i)
+            .map(|m| m.markers.clone())
+            .unwrap_or_default()
+    }
+
+    /// Add a marker (timestamp) to a movie at the given index
+    pub fn add_marker(&mut self, i: usize, time: f64) {
+        if let Some(movie) = self.config.movies.get_mut(i) {
+            // Avoid duplicate markers (within 0.5s tolerance)
+            let already_exists = movie.markers.iter().any(|&m| (m - time).abs() < 0.5);
+            if !already_exists {
+                movie.markers.push(time);
+                movie
+                    .markers
+                    .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            }
+        }
     }
 }
 

@@ -213,6 +213,7 @@ pub struct BrowseMenu {
     pub g: Group,
     items: Rc<RefCell<Vec<RenderItem>>>,
     page: Rc<Cell<usize>>,
+    last_page: Rc<Cell<usize>>, // Added to track previous page
     symbols: Rc<Vec<String>>,
     symbol: Rc<RefCell<String>>,
     page_index_list: Rc<RefCell<Vec<u32>>>,
@@ -223,6 +224,7 @@ impl BrowseMenu {
     pub fn new(width: i32, height: i32) -> Self {
         let items = Rc::new(RefCell::new(vec![]));
         let page = Rc::new(Cell::new(1));
+        let last_page = Rc::new(Cell::new(1));
 
         let symbols_chars = "uiop";
         let n = symbols_chars.len();
@@ -261,6 +263,7 @@ impl BrowseMenu {
             g,
             items,
             page,
+            last_page,
             symbols,
             symbol,
             page_index_list: page_path_list,
@@ -371,8 +374,8 @@ impl BrowseMenu {
             AddedTime => Random,
             Random => Fav,
             Fav => Marked,
-            Marked => WebDav,
-            WebDav => AddedTime,
+            Marked => AddedTime,
+            WebDav => AddedTime, // If current is WebDav, go back to start
             Actor(_) => AddedTime,
         };
 
@@ -385,13 +388,22 @@ impl BrowseMenu {
     }
 
     pub fn set_mode(&self, mode: MenuMode) {
+        // If entering a specific filter mode (like Actor), save current page and reset to 1
+        if matches!(mode, MenuMode::Actor(_)) {
+            self.last_page.set(self.page.get());
+            self.page.set(1);
+        }
         *self.mode.borrow_mut() = mode;
+    }
+
+    pub fn restore_last_page(&self) {
+        self.page.set(self.last_page.get());
     }
 
     pub fn prev_mode(&self) -> MenuMode {
         use MenuMode::*;
         let mode = match *self.mode.borrow() {
-            AddedTime => WebDav,
+            AddedTime => Marked,
             Random => AddedTime,
             Fav => Random,
             Marked => Fav,

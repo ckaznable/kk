@@ -20,3 +20,4 @@ kr = { path = "../kr" }
 kwa = { path = "../kwa" }
 itertools = "0.14.0"
 dirs = { workspace = true }
+webbrowser = "1.0"

@@ -241,58 +241,135 @@ fn main() {
                     // Handle mouse click in menu mode
                     let (x, y) = app::event_coords();
 
-                    if mouse_button == 3 {
-                        // Right-click on item: show context menu
-                        if let Some(item_index) = menu.get_item_at_pos(x, y) {
-                            let is_webdav = matches!(menu.current_mode(), MenuMode::WebDav);
+                                        if mouse_button == 3 {
 
-                            if is_webdav {
-                                let new_fav_status = wd_db.borrow_mut().toggle_fav(item_index as usize);
-                                wd_db.borrow().flush();
-                                redraw_menu_keep_page(menu.clone(), db.clone(), wd_db.clone(), menu.current_mode());
-                                println!("WebDAV Item {} favorite status toggled: {}", item_index, new_fav_status);
-                            } else {
-                                let is_fav = db.borrow().get_movie(item_index as usize).map(|m| m.fav).unwrap_or(false);
-                                let actors = db.borrow().get_actors(item_index as usize);
+                                            // Right-click logic
 
-                                // Step 1: Show main context menu with static labels
-                                let main_items = if is_fav {
-                                    menu::MenuItem::new(&["Unfavorite", "Actors"])
-                                } else {
-                                    menu::MenuItem::new(&["Favorite", "Actors"])
-                                };
+                                            if let Some(item_index) = menu.get_item_at_pos(x, y) {
 
-                                if let Some(val) = main_items.popup(x, y) {
-                                    let label = val.label().unwrap_or_default();
-                                    if label == "Favorite" || label == "Unfavorite" {
-                                        let new_fav_status = db.borrow_mut().toggle_fav(item_index as usize);
-                                        db.borrow().flush();
-                                        redraw_menu_keep_page(menu.clone(), db.clone(), wd_db.clone(), menu.current_mode());
-                                        println!("Item {} favorite status toggled: {}", item_index, new_fav_status);
-                                    } else if label == "Actors" {
-                                        if actors.len() == 1 {
-                                            // Single actor: directly filter
-                                            let actor_mode = MenuMode::Actor(actors[0].clone());
-                                            draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), actor_mode);
-                                        } else if actors.len() > 1 {
-                                            // Leak strings to get 'static refs for MenuItem::new
-                                            let static_refs: Vec<&'static str> = actors.iter()
-                                                .map(|s| &*Box::leak(s.clone().into_boxed_str()))
-                                                .collect();
-                                            let actor_menu = menu::MenuItem::new(&static_refs);
-                                            if let Some(val) = actor_menu.popup(x, y) {
-                                                if let Some(name) = val.label() {
-                                                    let actor_mode = MenuMode::Actor(name);
-                                                    draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), actor_mode);
+                                                // ... existing item context menu logic ...
+
+                                                let is_webdav = matches!(menu.current_mode(), MenuMode::WebDav);
+
+                    
+
+                                                if is_webdav {
+
+                                                    let new_fav_status = wd_db.borrow_mut().toggle_fav(item_index as usize);
+
+                                                    wd_db.borrow().flush();
+
+                                                    redraw_menu_keep_page(menu.clone(), db.clone(), wd_db.clone(), menu.current_mode());
+
+                                                    println!("WebDAV Item {} favorite status toggled: {}", item_index, new_fav_status);
+
+                                                } else {
+
+                                                    let is_fav = db.borrow().get_movie(item_index as usize).map(|m| m.fav).unwrap_or(false);
+
+                                                    let actors = db.borrow().get_actors(item_index as usize);
+
+                    
+
+                                                    // Step 1: Show main context menu with static labels
+
+                                                    let main_items = if is_fav {
+
+                                                        menu::MenuItem::new(&["Unfavorite", "Actors"])
+
+                                                    } else {
+
+                                                        menu::MenuItem::new(&["Favorite", "Actors"])
+
+                                                    };
+
+                    
+
+                                                    if let Some(val) = main_items.popup(x, y) {
+
+                                                        let label = val.label().unwrap_or_default();
+
+                                                        if label == "Favorite" || label == "Unfavorite" {
+
+                                                            let new_fav_status = db.borrow_mut().toggle_fav(item_index as usize);
+
+                                                            db.borrow().flush();
+
+                                                            redraw_menu_keep_page(menu.clone(), db.clone(), wd_db.clone(), menu.current_mode());
+
+                                                            println!("Item {} favorite status toggled: {}", item_index, new_fav_status);
+
+                                                        } else if label == "Actors" {
+
+                                                            if actors.len() == 1 {
+
+                                                                // Single actor: directly filter
+
+                                                                let actor_mode = MenuMode::Actor(actors[0].clone());
+
+                                                                draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), actor_mode);
+
+                                                            } else if actors.len() > 1 {
+
+                                                                // Leak strings to get 'static refs for MenuItem::new
+
+                                                                let static_refs: Vec<&'static str> = actors.iter()
+
+                                                                    .map(|s| &*Box::leak(s.clone().into_boxed_str()))
+
+                                                                    .collect();
+
+                                                                let actor_menu = menu::MenuItem::new(&static_refs);
+
+                                                                if let Some(val) = actor_menu.popup(x, y) {
+
+                                                                    if let Some(name) = val.label() {
+
+                                                                        let actor_mode = MenuMode::Actor(name);
+
+                                                                        draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), actor_mode);
+
+                                                                    }
+
+                                                                }
+
+                                                            }
+
+                                                        }
+
+                                                    }
+
                                                 }
+
+                                            } else {
+
+                                                // Clicked on empty area: Show global context menu
+
+                                                                            let global_items = menu::MenuItem::new(&["WebDAV", "Local"]);
+
+                                                                            if let Some(val) = global_items.popup(x, y) {
+
+                                                                                match val.label().unwrap_or_default().as_str() {
+
+                                                                                    "WebDAV" => draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), MenuMode::WebDav),
+
+                                                                                    "Local" => draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), MenuMode::AddedTime),
+
+                                                                                    _ => {}
+
+                                                                                }
+
+                                                                            }
+
+                                                
+
                                             }
+
+                                            return true;
+
                                         }
-                                    }
-                                }
-                            }
-                            return true;
-                        }
-                    } else {
+
+                     else {
                         // Left-click handler
                         // First check if clicking on status bar to toggle mode
                         if menu.is_status_bar_click(x, y) {
@@ -357,6 +434,7 @@ fn main() {
                     }
                     Key::BackSpace => {
                         if matches!(menu.current_mode(), MenuMode::Actor(_)) {
+                            menu.restore_last_page();
                             draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), MenuMode::AddedTime);
                         } else {
                             menu.pop_symbol();
@@ -592,15 +670,12 @@ fn try_play_video(
     if is_webdav {
         let wd_ref = wd_db.borrow();
         if let Some(data) = wd_ref.get_movie(movie_index) {
-            // Check if we have URL, if not check dirs
-            let has_url = !wd_ref.config.base_url.is_empty() || dirs::WEBDAV_URL.is_some();
-            if has_url {
-                app_tx.send(AppHandleEvent::GoToVideo(
-                    data.url_path.clone(),
-                    movie_index,
-                    data.markers.clone(),
-                    true,
-                ));
+            if let Some(ref num) = data.movie.num {
+                let url = format!("https://missav.ws/search/{}", num);
+                println!("Opening browser for WebDAV movie: {}", url);
+                if let Err(e) = webbrowser::open(&url) {
+                    eprintln!("Failed to open browser: {}", e);
+                }
                 return true;
             }
         }
@@ -687,7 +762,6 @@ fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<kr::db::SimpleJsonDa
         items.len()
     );
 
-    menu.set_page(1);
     menu.set_item(items);
     menu.draw();
 }

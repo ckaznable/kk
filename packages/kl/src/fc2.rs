@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use kr::{Actor, Movie};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use scraper::{Html, Selector};
 
 pub struct Fc2Scraper {
@@ -12,7 +12,7 @@ impl Fc2Scraper {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".parse()?,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36".parse()?,
         );
 
         let client = Client::builder()
@@ -30,20 +30,20 @@ impl Fc2Scraper {
             .replace("fc2-", "")
     }
 
-    pub fn scrape(&self, number: &str) -> Result<Movie> {
+    pub async fn scrape(&self, number: &str) -> Result<Movie> {
         let normalized_number = self.normalize_number(number);
         let detail_url = format!(
             "https://adult.contents.fc2.com/article/{}/",
             normalized_number
         );
 
-        let response = self.client.get(&detail_url).send()?;
+        let response = self.client.get(&detail_url).send().await?;
 
         if response.status().as_u16() == 404 {
             return Err(anyhow!("Movie not found: FC2-{}", normalized_number));
         }
 
-        let html = response.text()?;
+        let html = response.text().await?;
         let document = Html::parse_document(&html);
 
         // Extract data
@@ -179,8 +179,9 @@ impl Fc2Scraper {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::Scraper for Fc2Scraper {
-    fn scrape(&self, number: &str) -> Result<Movie> {
-        self.scrape(number)
+    async fn scrape(&self, number: &str) -> Result<Movie> {
+        self.scrape(number).await
     }
 }

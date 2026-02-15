@@ -1,12 +1,14 @@
 pub mod fc2;
 pub mod javdb;
 pub mod number_parser;
+pub mod browser;
 
 use anyhow::Result;
 use kr::Movie;
 
-pub trait Scraper {
-    fn scrape(&self, number: &str) -> Result<Movie>;
+#[async_trait::async_trait]
+pub trait Scraper: Send + Sync {
+    async fn scrape(&self, number: &str) -> Result<Movie>;
 }
 
 pub fn generate_nfo_xml(movie: &Movie) -> Result<String> {

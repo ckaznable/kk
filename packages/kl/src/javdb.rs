@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use kr::{Actor, Movie};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use scraper::{Html, Selector};
 
 pub struct JavdbScraper {
@@ -47,7 +47,7 @@ impl JavdbScraper {
         Ok(scraper)
     }
 
-    fn search_movie(&self, number: &str) -> Result<String> {
+    pub async fn search_movie(&self, number: &str) -> Result<String> {
         let clean_number = number.replace("-", "").replace("_", "").to_uppercase();
         let search_url = format!("https://{}.com/search?q={}&f=all", self.site, number);
 
@@ -59,14 +59,14 @@ impl JavdbScraper {
         }
         request = request.header("Cookie", cookie_str);
 
-        let response = request.send()?;
+        let response = request.send().await?;
 
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             eprintln!("Error: 403 Forbidden when searching JavDB. This usually means Cloudflare protection is active.");
             return Err(anyhow!("JavDB access forbidden (403). Cloudflare challenge active."));
         }
 
-        let html = response.text()?;
+        let html = response.text().await?;
         let document = Html::parse_document(&html);
 
         // Broadest possible selectors
@@ -117,8 +117,8 @@ impl JavdbScraper {
         Ok(format!("https://{}.com{}", self.site, correct_url))
     }
 
-    pub fn scrape(&self, number: &str) -> Result<Movie> {
-        let detail_url = self.search_movie(number)?;
+    pub async fn scrape(&self, number: &str) -> Result<Movie> {
+        let detail_url = self.search_movie(number).await?;
 
         let mut request = self.client.get(&detail_url);
         
@@ -128,14 +128,14 @@ impl JavdbScraper {
         }
         request = request.header("Cookie", cookie_str);
 
-        let response = request.send()?;
+        let response = request.send().await?;
 
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             eprintln!("Error: 403 Forbidden when accessing JavDB details. This usually means Cloudflare protection is active.");
             return Err(anyhow!("JavDB details access forbidden (403)."));
         }
 
-        let html = response.text()?;
+        let html = response.text().await?;
 
         // Check if authentication is required
         if html.contains("此內容需要登入才能查看或操作")
@@ -380,8 +380,9 @@ impl JavdbScraper {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::Scraper for JavdbScraper {
-    fn scrape(&self, number: &str) -> Result<Movie> {
-        self.scrape(number)
+    async fn scrape(&self, number: &str) -> Result<Movie> {
+        self.scrape(number).await
     }
 }

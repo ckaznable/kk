@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use base64::prelude::*;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -77,7 +77,7 @@ impl WebDavClient {
         headers
     }
 
-    pub fn exists(&self, path: &str) -> Result<bool> {
+    pub async fn exists(&self, path: &str) -> Result<bool> {
         let url = self.base_url.join(path)?;
         let mut headers = self.headers();
         headers.insert("Depth", HeaderValue::from_static("0"));
@@ -86,7 +86,8 @@ impl WebDavClient {
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
             .headers(headers)
-            .send()?;
+            .send()
+            .await?;
 
         Ok(resp.status().is_success())
     }
@@ -102,7 +103,7 @@ impl WebDavClient {
         Ok(url.to_string())
     }
 
-    pub fn list(&self, path: &str) -> Result<Vec<WebDavResource>> {
+    pub async fn list(&self, path: &str) -> Result<Vec<WebDavResource>> {
         let url = self.base_url.join(path)?;
         let mut headers = self.headers();
         headers.insert("Depth", HeaderValue::from_static("1"));
@@ -111,13 +112,14 @@ impl WebDavClient {
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
             .headers(headers)
-            .send()?;
+            .send()
+            .await?;
 
         if !resp.status().is_success() {
             return Err(anyhow!("WebDAV PROPFIND failed: {}", resp.status()));
         }
 
-        let body = resp.text()?;
+        let body: String = resp.text().await?;
         let multistatus: Multistatus = quick_xml::de::from_str(&body)?;
 
         let resources = multistatus

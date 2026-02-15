@@ -48,6 +48,10 @@ enum Commands {
         /// JavDB cookie (overrides ENV)
         #[arg(short, long)]
         cookie: Option<String>,
+
+        /// Use legacy headless HTTP scraper (no browser)
+        #[arg(long)]
+        headless: bool,
     },
 
     /// Fix database issues like broken thumbnails
@@ -67,6 +71,10 @@ enum Commands {
         /// List items that need fixing without taking action
         #[arg(long)]
         list_need_fix: bool,
+
+        /// Use legacy headless HTTP scraper (no browser)
+        #[arg(long)]
+        headless: bool,
     },
 
     /// Test scrape a single ID without saving or downloading anything
@@ -77,10 +85,15 @@ enum Commands {
         /// JavDB cookie (overrides ENV)
         #[arg(short, long)]
         cookie: Option<String>,
+
+        /// Use legacy headless HTTP scraper (no browser)
+        #[arg(long)]
+        headless: bool,
     },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -89,70 +102,104 @@ fn main() -> anyhow::Result<()> {
             test_first,
             fix_num,
             list_need_fix,
+            headless,
         } => {
-            run_fix_db(dry_run, test_first, fix_num, list_need_fix)?;
+            run_fix_db(dry_run, test_first, fix_num, list_need_fix, headless).await?;
         }
         Commands::Tidy { input, output } => {
             let output_path = output.unwrap_or_else(|| dirs::SEARCH_PATH.to_path_buf());
-            run_scraper(input, output_path)?;
+            run_scraper(input, output_path).await?;
         }
-        Commands::Webdav { url, user, pass, path, list_only, cookie } => {
-            run_webdav_scraper(url, user, pass, path, list_only, cookie)?;
+        Commands::Webdav { url, user, pass, path, list_only, cookie, headless } => {
+            run_webdav_scraper(url, user, pass, path, list_only, cookie, headless).await?;
         }
-        Commands::TestScrape { id, cookie } => {
-            run_test_scrape(&id, cookie)?;
+        Commands::TestScrape { id, cookie, headless } => {
+            run_test_scrape(&id, cookie, headless).await?;
         }
     }
     Ok(())
 }
 
-fn run_test_scrape(id: &str, cookie: Option<String>) -> anyhow::Result<()> {
-    println!("Testing scrape for ID: {}", id);
-    let cookie = cookie.or_else(|| dirs::JAVDB_COOKIE.clone());
-    let javdb = kl::javdb::JavdbScraper::with_cookie(cookie)?;
-    let fc2 = kl::fc2::Fc2Scraper::new()?;
+fn run_test_scrape(id: &str, cookie: Option<String>, headless: bool) -> impl std::future::Future<Output = anyhow::Result<()>> {
+    let id = id.to_string();
+    async move {
+        println!("Testing scrape for ID: {}", id);
 
-    let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
-        &fc2
-    } else {
-        &javdb
-    };
+        let movie = if !headless {
+            let scraper = kl::browser::BrowserScraper::new().await?;
+            let is_fc2 = id.to_uppercase().starts_with("FC2");
+            if is_fc2 {
+                return Err(anyhow::anyhow!("Browser scraping not yet implemented for FC2"));
+            }
+            
+            scraper.scrape_with_interaction(&id, true).await?
+        } else {
+            let cookie = cookie.or_else(|| dirs::JAVDB_COOKIE.clone());
+            let javdb = kl::javdb::JavdbScraper::with_cookie(cookie)?;
+            let fc2 = kl::fc2::Fc2Scraper::new()?;
 
-    match scraper.scrape(id) {
-        Ok(movie) => {
-            println!("--- Scrape Result ---");
-            println!("Title:      {}", movie.title);
-            println!("Number:     {}", movie.num.as_deref().unwrap_or("-"));
-            println!("Release:    {}", movie.releasedate.as_deref().unwrap_or("-"));
-            println!("Label:      {}", movie.label.as_deref().unwrap_or("-"));
-            println!("Actors:     {}", movie.actor.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "));
-            println!("Genres:     {}", movie.genre.as_ref().map(|g| g.join(", ")).unwrap_or_default());
-            println!("Tags:       {}", movie.tag.as_ref().map(|t| t.join(", ")).unwrap_or_default());
-            println!("Poster URL: {}", movie.poster.as_deref().unwrap_or("-"));
-            println!("Thumb URL:  {}", movie.thumb.as_deref().unwrap_or("-"));
-            println!("Cover URL:  {}", movie.cover.as_deref().unwrap_or("-"));
-            println!("Website:    {}", movie.website.as_deref().unwrap_or("-"));
-            println!("--- End of Result ---");
-        }
-        Err(e) => {
-            eprintln!("Scrape failed: {}", e);
-        }
+            let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
+                &fc2
+            } else {
+                &javdb
+            };
+            scraper.scrape(&id).await?
+        };
+
+        println!("--- Scrape Result ---");
+        println!("Title:      {}", movie.title);
+        println!("Number:     {}", movie.num.as_deref().unwrap_or("-"));
+        println!("Release:    {}", movie.releasedate.as_deref().unwrap_or("-"));
+        println!("Label:      {}", movie.label.as_deref().unwrap_or("-"));
+        println!(
+            "Actors:     {}",
+            movie
+                .actor
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "Genres:     {}",
+            movie.genre.as_ref().map(|g| g.join(", ")).unwrap_or_default()
+        );
+        println!(
+            "Tags:       {}",
+            movie.tag.as_ref().map(|t| t.join(", ")).unwrap_or_default()
+        );
+        println!("Poster URL: {}", movie.poster.as_deref().unwrap_or("-"));
+        println!("Thumb URL:  {}", movie.thumb.as_deref().unwrap_or("-"));
+        println!("Cover URL:  {}", movie.cover.as_deref().unwrap_or("-"));
+        println!("Website:    {}", movie.website.as_deref().unwrap_or("-"));
+        println!("--- End of Result ---");
+
+        Ok(())
     }
-
-    Ok(())
 }
 
-fn run_fix_db(
+async fn run_fix_db(
     dry_run: bool,
     test_first: bool,
     fix_num: Option<usize>,
     list_need_fix: bool,
+    headless: bool,
 ) -> anyhow::Result<()> {
     // Explicitly load DB configuration instead of using default empty init
     let mut db = kr::db::SimpleJsonDatabase::new()
         .map_err(|e| anyhow::anyhow!("Failed to load database: {}", e))?;
     let javdb = kl::javdb::JavdbScraper::new()?;
     let fc2 = kl::fc2::Fc2Scraper::new()?;
+
+    // Initialize browser session if requested (default)
+    let mut browser_session = None;
+    let browser_scraper = if !headless {
+        let scraper = kl::browser::BrowserScraper::new().await?;
+        browser_session = Some(scraper.start_session("https://javdb.com/").await?);
+        Some(scraper)
+    } else {
+        None
+    };
 
     let mut modified = false;
     let mut fix_count = 0;
@@ -275,7 +322,7 @@ fn run_fix_db(
                     target_img_path.clone()
                 };
 
-                match download_file(&url, &dest) {
+                match download_file(&url, &dest).await {
                     Ok(_) => {
                         println!("  Downloaded successfully to: {:?}", dest);
                         if test_first {
@@ -337,13 +384,19 @@ fn run_fix_db(
             let id_opt = db.config.movies[i].movie.num.clone();
             if let Some(id) = id_opt {
                 println!("  Re-scraping ID: {}", id);
-                let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
-                    &fc2
+
+                let scrape_result = if let Some(session) = &browser_session {
+                    browser_scraper.as_ref().unwrap().scrape_session(session, &id, !id.to_uppercase().starts_with("FC2")).await
                 } else {
-                    &javdb
+                    let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
+                        &fc2
+                    } else {
+                        &javdb
+                    };
+                    scraper.scrape(&id).await
                 };
 
-                match scraper.scrape(&id) {
+                match scrape_result {
                     Ok(mut new_movie) => {
                         println!("  Scraped: {}", new_movie.title);
 
@@ -356,7 +409,7 @@ fn run_fix_db(
 
                         // Handle images
                         if let Some(poster_url) = &new_movie.poster {
-                            if let Ok(_) = download_file(poster_url, &target_img_path) {
+                            if let Ok(_) = download_file(poster_url, &target_img_path).await {
                                 println!("  Downloaded new thumb: {:?}", target_img_path);
 
                                 // Copy to Cache
@@ -402,6 +455,10 @@ fn run_fix_db(
         return Ok(());
     }
 
+    if let Some(session) = browser_session {
+        session.browser.close().await?;
+    }
+
     if modified {
         db.flush();
         println!("Database flushed with {} fixes.", fix_count);
@@ -412,8 +469,8 @@ fn run_fix_db(
     Ok(())
 }
 
-fn download_file(url: &str, path: &PathBuf) -> anyhow::Result<()> {
-    let bytes = reqwest::blocking::get(url)?.bytes()?;
+async fn download_file(url: &str, path: &PathBuf) -> anyhow::Result<()> {
+    let bytes = reqwest::get(url).await?.bytes().await?;
     let mut file = fs::File::create(path)?;
     file.write_all(&bytes)?;
     Ok(())
@@ -425,17 +482,18 @@ fn update_nfo_file(movie_data: &kr::db::MovieData) {
     }
 }
 
-fn run_webdav_scraper(
+async fn run_webdav_scraper(
     url: Option<String>,
     user: Option<String>,
     pass: Option<String>,
     remote_path: String,
     list_only: bool,
     cookie: Option<String>,
+    headless: bool,
 ) -> anyhow::Result<()> {
     let mut db = kr::db::WebDavDatabase::new()?;
 
-    // Update DB config only if provided
+    // ... (config logic)
     if let Some(u) = url {
         db.config.base_url = u;
     }
@@ -473,7 +531,7 @@ fn run_webdav_scraper(
 
     if list_only {
         println!("Dry run mode: Listing files to be scraped from {}", remote_path);
-        recursive_scan_webdav(&client, &remote_path, &mut db, None, None, &PathBuf::new(), 0, true, cookie)?;
+        recursive_scan_webdav(&client, &remote_path, &mut db, None, None, &PathBuf::new(), 0, true, cookie, None).await?;
         return Ok(());
     }
 
@@ -484,15 +542,41 @@ fn run_webdav_scraper(
         fs::create_dir_all(&cache_dir)?;
     }
 
+    // Initialize browser session if requested (default)
+    let mut browser_session = None;
+    let browser_scraper = if !headless {
+        let scraper = kl::browser::BrowserScraper::new().await?;
+        browser_session = Some(scraper.start_session("https://javdb.com/").await?);
+        Some(scraper)
+    } else {
+        None
+    };
+
     // Use a queue for breadth-first search or just recursion. Let's use a recursive helper.
-    recursive_scan_webdav(&client, &remote_path, &mut db, Some(&javdb), Some(&fc2), &cache_dir, 0, false, cookie)?;
+    recursive_scan_webdav(
+        &client, 
+        &remote_path, 
+        &mut db, 
+        Some(&javdb), 
+        Some(&fc2), 
+        &cache_dir, 
+        0, 
+        false, 
+        cookie,
+        browser_scraper.as_ref().zip(browser_session.as_ref())
+    ).await?;
+
+    if let Some(session) = browser_session {
+        session.browser.close().await?;
+    }
 
     db.flush();
     println!("WebDAV database flushed.");
     Ok(())
 }
 
-fn recursive_scan_webdav(
+#[async_recursion::async_recursion]
+async fn recursive_scan_webdav(
     client: &kwa::WebDavClient,
     path: &str,
     db: &mut kr::db::WebDavDatabase,
@@ -502,6 +586,7 @@ fn recursive_scan_webdav(
     depth: usize,
     list_only: bool,
     cookie: Option<String>,
+    browser: Option<(&kl::browser::BrowserScraper, &kl::browser::BrowserSession)>,
 ) -> anyhow::Result<()> {
     // Limit depth to prevent infinite loops, but 5 should be plenty for "at least two levels"
     if depth > 5 {
@@ -509,7 +594,7 @@ fn recursive_scan_webdav(
     }
 
     println!("Scanning WebDAV path: {}", path);
-    let resources = match client.list(path) {
+    let resources = match client.list(path).await {
         Ok(res) => res,
         Err(e) => {
             eprintln!("  Failed to list {}: {}", path, e);
@@ -524,7 +609,7 @@ fn recursive_scan_webdav(
         }
 
         if res.is_dir {
-            recursive_scan_webdav(client, &res.path, db, javdb, fc2, cache_dir, depth + 1, list_only, cookie.clone())?;
+            recursive_scan_webdav(client, &res.path, db, javdb, fc2, cache_dir, depth + 1, list_only, cookie.clone(), browser).await?;
             continue;
         }
 
@@ -563,22 +648,27 @@ fn recursive_scan_webdav(
         if let Some(number) = kl::number_parser::get_number(p) {
             println!("  Found ID: {}", number);
 
-            let scraper: &dyn Scraper = if number.to_uppercase().starts_with("FC2") {
-                fc2.unwrap()
+            let scrape_result = if let Some((scraper, session)) = browser {
+                scraper.scrape_session(session, &number, !number.to_uppercase().starts_with("FC2")).await
             } else {
-                javdb.unwrap()
+                let scraper: &dyn Scraper = if number.to_uppercase().starts_with("FC2") {
+                    fc2.unwrap()
+                } else {
+                    javdb.unwrap()
+                };
+                scraper.scrape(&number).await
             };
 
-            match scraper.scrape(&number) {
+            match scrape_result {
                 Ok(mut movie) => {
                     println!("  Scraped: {}", movie.title);
 
                     // Download images to local cache
                     let global_thumb_path = cache_dir.join(format!("{}.jpg", number));
                     if let Some(poster_url) = &movie.poster {
-                        match reqwest::blocking::get(poster_url) {
+                        match reqwest::get(poster_url).await {
                             Ok(response) => {
-                                if let Ok(bytes) = response.bytes() {
+                                if let Ok(bytes) = response.bytes().await {
                                     if let Err(e) = fs::write(&global_thumb_path, &bytes) {
                                         eprintln!("  Failed to write to cache: {}", e);
                                     } else {
@@ -609,7 +699,7 @@ fn recursive_scan_webdav(
     Ok(())
 }
 
-fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
+async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
     if !output.exists() {
         fs::create_dir_all(&output)?;
     }
@@ -648,7 +738,7 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                 &javdb
                             };
 
-                        match scraper.scrape(&number) {
+                        match scraper.scrape(&number).await {
                             Ok(mut movie) => {
                                 println!("  Scraped: {}", movie.title);
 
@@ -715,9 +805,9 @@ fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                 if let Some(poster_url) = &movie.poster {
                                     // Download poster to movie dir
                                     let img_path = movie_dir.join(format!("{}-poster.jpg", number));
-                                    match reqwest::blocking::get(poster_url) {
+                                    match reqwest::get(poster_url).await {
                                         Ok(response) => {
-                                            if let Ok(bytes) = response.bytes() {
+                                            if let Ok(bytes) = response.bytes().await {
                                                 if let Ok(mut file) = fs::File::create(&img_path) {
                                                     file.write_all(&bytes).ok();
                                                     println!("  Saved Poster: {:?}", img_path);

@@ -45,7 +45,8 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let url = cli.url.or_else(|| dirs::WEBDAV_URL.clone()).ok_or_else(|| anyhow::anyhow!("WebDAV URL not provided via --url or WEBDAV_URL env"))?;
@@ -62,7 +63,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::List { path } => {
-            let resources = client.list(&path)?;
+            let resources = client.list(&path).await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&resources)?);
             } else {
@@ -74,7 +75,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Exists { path } => {
-            let exists = client.exists(&path)?;
+            let exists = client.exists(&path).await?;
             if cli.json {
                 println!("{}", serde_json::json!({ "path": path, "exists": exists }));
             } else {

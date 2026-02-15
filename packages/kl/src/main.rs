@@ -445,7 +445,7 @@ async fn run_fix_db(
                     Err(e) => eprintln!("  Re-scrape failed: {}", e),
                 }
 
-                thread::sleep(Duration::from_secs(2));
+                thread::sleep(Duration::from_secs(6));
             }
         }
     }
@@ -613,7 +613,13 @@ async fn recursive_scan_webdav(
             continue;
         }
 
-        let p = std::path::Path::new(&res.path);
+        // Normalize path: some servers return full URLs in href, we want the path relative to base or absolute path
+        let mut res_path = res.path.clone();
+        if let Ok(url) = reqwest::Url::parse(&res_path) {
+            res_path = url.path().to_string();
+        }
+
+        let p = std::path::Path::new(&res_path);
         let ext = p
             .extension()
             .and_then(|s| s.to_str())
@@ -630,33 +636,41 @@ async fn recursive_scan_webdav(
             }
         }
 
+        // Check if ID is already in DB
+        let number = kl::number_parser::get_number(p);
+        if let Some(ref num) = number {
+            if db.contains_id(num) {
+                continue;
+            }
+        }
+
+        // Already in DB by path?
+        if db.config.movies.iter().any(|m| m.url_path == res_path) {
+            continue;
+        }
+
         if list_only {
-            if let Some(number) = kl::number_parser::get_number(p) {
-                println!("  [Found] ID: {:<12} | Path: {}", number, res.path);
+            if let Some(ref num) = number {
+                println!("  [Found] ID: {:<12} | Path: {}", num, res_path);
             } else {
-                println!("  [Skip]  No ID found  | Path: {}", res.path);
+                println!("  [Skip]  No ID found  | Path: {}", res_path);
             }
             continue;
         }
 
-        // Already in DB?
-        if db.config.movies.iter().any(|m| m.url_path == res.path) {
-            continue;
-        }
-
-        println!("Processing remote file: {}", res.path);
-        if let Some(number) = kl::number_parser::get_number(p) {
-            println!("  Found ID: {}", number);
+        println!("Processing remote file: {}", res_path);
+        if let Some(num) = number {
+            println!("  Found ID: {}", num);
 
             let scrape_result = if let Some((scraper, session)) = browser {
-                scraper.scrape_session(session, &number, !number.to_uppercase().starts_with("FC2")).await
+                scraper.scrape_session(session, &num, !num.to_uppercase().starts_with("FC2")).await
             } else {
-                let scraper: &dyn Scraper = if number.to_uppercase().starts_with("FC2") {
+                let scraper: &dyn Scraper = if num.to_uppercase().starts_with("FC2") {
                     fc2.unwrap()
                 } else {
                     javdb.unwrap()
                 };
-                scraper.scrape(&number).await
+                scraper.scrape(&num).await
             };
 
             match scrape_result {
@@ -664,7 +678,7 @@ async fn recursive_scan_webdav(
                     println!("  Scraped: {}", movie.title);
 
                     // Download images to local cache
-                    let global_thumb_path = cache_dir.join(format!("{}.jpg", number));
+                    let global_thumb_path = cache_dir.join(format!("{}.jpg", num));
                     if let Some(poster_url) = &movie.poster {
                         match reqwest::get(poster_url).await {
                             Ok(response) => {
@@ -683,16 +697,19 @@ async fn recursive_scan_webdav(
                     }
 
                     db.config.movies.push(kr::db::WebDavMovieData {
-                        url_path: res.path,
+                        url_path: res_path,
                         movie,
                         added_time: std::time::SystemTime::now(),
                         fav: false,
                         markers: Vec::new(),
                     });
+                    
+                    // Flush after each successful scrape to avoid losing progress
+                    db.flush();
                 }
                 Err(e) => eprintln!("  Scrape failed: {}", e),
             }
-            thread::sleep(Duration::from_secs(2));
+            thread::sleep(Duration::from_secs(6));
         }
     }
 
@@ -863,7 +880,7 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                         }
 
                         // Add delay to avoid rate limiting
-                        thread::sleep(Duration::from_secs(2));
+                        thread::sleep(Duration::from_secs(6));
                     } else {
                         println!("  Could not extract ID from filename");
                     }

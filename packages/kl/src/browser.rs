@@ -54,6 +54,7 @@ impl BrowserScraper {
             let search_url = format!("https://javdb.com/search?q={}&f=all", number);
             println!("Searching for {}: {}", number, search_url);
             page.goto_builder(&search_url).goto().await?;
+            self.check_verification(page).await?;
 
             // 2. Auto-click first result
             let clicked: bool = page.eval(r#"() => {
@@ -75,6 +76,7 @@ impl BrowserScraper {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 retries += 1;
             }
+            self.check_verification(page).await?;
 
             // 4. Extraction
             self.extract_javdb(page).await
@@ -90,7 +92,34 @@ impl BrowserScraper {
         Ok(movie)
     }
 
+    async fn check_verification(&self, page: &playwright::api::Page) -> Result<()> {
+        let is_verification: bool = page.eval(r#"() => {
+            const text = document.body.innerText;
+            return text.includes('Security Verification') || 
+                   text.includes('安全驗證') || 
+                   text.includes('Checking your browser') ||
+                   text.includes('Cloudflare') ||
+                   document.title.includes('Security Verification') ||
+                   document.title.includes('Cloudflare');
+        }"#).await.unwrap_or(false);
+
+        if is_verification {
+            println!("**************************************************");
+            println!("* SECURITY VERIFICATION DETECTED                 *");
+            println!("* Please pass the challenge in the browser.      *");
+            println!("* Press ENTER here ONCE you are verified.        *");
+            println!("**************************************************");
+
+            tokio::task::spawn_blocking(|| {
+                let mut input = String::new();
+                let _ = std::io::stdin().read_line(&mut input);
+            }).await?;
+        }
+        Ok(())
+    }
+
     async fn extract_javdb(&self, page: &playwright::api::Page) -> Result<Movie> {
+        self.check_verification(page).await?;
         let current_url = page.url()?;
         println!("Extracting data from: {}", current_url);
 

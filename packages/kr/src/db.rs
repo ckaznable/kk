@@ -125,6 +125,18 @@ impl WebDavDatabase {
         }
         false
     }
+
+    pub fn contains_id(&self, id: &str) -> bool {
+        let clean_id = id.to_uppercase().replace("-", "").replace("_", "");
+        self.config.movies.iter().any(|m| {
+            if let Some(ref num) = m.movie.num {
+                let clean_num = num.to_uppercase().replace("-", "").replace("_", "");
+                clean_num == clean_id
+            } else {
+                false
+            }
+        })
+    }
 }
 
 #[derive(Debug)]

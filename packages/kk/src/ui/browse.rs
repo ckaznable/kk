@@ -35,6 +35,7 @@ pub enum MenuMode {
     Fav,
     Marked,
     Actor(String),
+    WebDav,
 }
 
 impl MenuMode {
@@ -45,17 +46,19 @@ impl MenuMode {
             MenuMode::Fav => "Favorites".to_string(),
             MenuMode::Marked => "Marked".to_string(),
             MenuMode::Actor(name) => format!("Actor: {}", name),
+            MenuMode::WebDav => "WebDAV".to_string(),
         }
     }
 }
 
 #[derive(Clone)]
 pub struct RenderItem {
-    nfo_path: PathBuf,
-    img_path: PathBuf,
-    title: String,
-    index: u32,
-    fav: bool,
+    pub path: String, // NFO path or WebDAV relative path
+    pub img_path: PathBuf,
+    pub title: String,
+    pub index: u32,
+    pub fav: bool,
+    pub is_webdav: bool,
 }
 
 impl TryFrom<IndexedMovieData<'_>> for RenderItem {
@@ -69,12 +72,28 @@ impl TryFrom<IndexedMovieData<'_>> for RenderItem {
             .join(value.movie.movie.thumb.clone().ok_or(())?);
 
         Ok(Self {
-            nfo_path,
+            path: nfo_path.to_string_lossy().to_string(),
             img_path,
             title: value.movie.movie.title.clone(),
             index: value.index,
             fav: value.movie.fav,
+            is_webdav: false,
         })
+    }
+}
+
+impl From<(usize, &kr::db::WebDavMovieData)> for RenderItem {
+    fn from(value: (usize, &kr::db::WebDavMovieData)) -> Self {
+        let (index, data) = value;
+        let img_path = data.movie.thumb.as_ref().map(PathBuf::from).unwrap_or_default();
+        Self {
+            path: data.url_path.clone(),
+            img_path,
+            title: data.movie.title.clone(),
+            index: index as u32,
+            fav: data.fav,
+            is_webdav: true,
+        }
     }
 }
 
@@ -306,7 +325,7 @@ impl BrowseMenu {
             })
             .map(|(item, s)| {
                 if MenuItem::new(item.clone(), s).is_err() {
-                    println!("{:?} render failed", item.nfo_path);
+                    println!("{:?} render failed", item.path);
                 };
 
                 item.index
@@ -352,7 +371,8 @@ impl BrowseMenu {
             AddedTime => Random,
             Random => Fav,
             Fav => Marked,
-            Marked => AddedTime,
+            Marked => WebDav,
+            WebDav => AddedTime,
             Actor(_) => AddedTime,
         };
 
@@ -371,10 +391,11 @@ impl BrowseMenu {
     pub fn prev_mode(&self) -> MenuMode {
         use MenuMode::*;
         let mode = match *self.mode.borrow() {
-            AddedTime => Marked,
+            AddedTime => WebDav,
             Random => AddedTime,
             Fav => Random,
             Marked => Fav,
+            WebDav => Marked,
             Actor(_) => AddedTime,
         };
 

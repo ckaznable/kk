@@ -6,15 +6,28 @@ use scraper::{Html, Selector};
 pub struct JavdbScraper {
     client: Client,
     site: String,
+    cookie: Option<String>,
 }
 
 impl JavdbScraper {
     pub fn new() -> Result<Self> {
+        Self::with_cookie(None)
+    }
+
+    pub fn with_cookie(cookie: Option<String>) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
+        // ... (headers initialization remains same)
         headers.insert(
             "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36".parse()?,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36".parse()?,
         );
+        // ... (other headers)
+        headers.insert("Accept-Language", "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7".parse()?);
+        headers.insert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7".parse()?);
+        headers.insert("Cache-Control", "max-age=0".parse()?);
+        headers.insert("Sec-Ch-Ua", "\"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"144\", \"Chromium\";v=\"144\"".parse()?);
+        headers.insert("Sec-Ch-Ua-Mobile", "?0".parse()?);
+        headers.insert("Sec-Ch-Ua-Platform", "\"Windows\"".parse()?);
 
         let client = Client::builder()
             .cookie_store(true)
@@ -24,6 +37,7 @@ impl JavdbScraper {
         Ok(Self {
             client,
             site: "javdb".to_string(),
+            cookie,
         })
     }
 
@@ -34,53 +48,70 @@ impl JavdbScraper {
     }
 
     fn search_movie(&self, number: &str) -> Result<String> {
+        let clean_number = number.replace("-", "").replace("_", "").to_uppercase();
         let search_url = format!("https://{}.com/search?q={}&f=all", self.site, number);
 
-        // Set cookies
-        let cookie_url = format!("https://{}.com", self.site);
-        self.client
-            .get(&cookie_url)
-            .header("Cookie", "over18=1; theme=auto; locale=zh")
-            .send()?;
+        let mut request = self.client.get(&search_url);
+        
+        let mut cookie_str = "over18=1; theme=auto; locale=zh".to_string();
+        if let Some(ref c) = self.cookie {
+            cookie_str = format!("{}; {}", cookie_str, c);
+        }
+        request = request.header("Cookie", cookie_str);
 
-        let response = self
-            .client
-            .get(&search_url)
-            .header("Cookie", "over18=1; theme=auto; locale=zh")
-            .send()?;
+        let response = request.send()?;
+
+        if response.status() == reqwest::StatusCode::FORBIDDEN {
+            eprintln!("Error: 403 Forbidden when searching JavDB. This usually means Cloudflare protection is active.");
+            return Err(anyhow!("JavDB access forbidden (403). Cloudflare challenge active."));
+        }
 
         let html = response.text()?;
         let document = Html::parse_document(&html);
 
-        // Find the correct movie URL from search results
-        let url_selector = Selector::parse(".movie-list > div > a").unwrap();
-        let title_selector = Selector::parse(".video-title strong").unwrap();
+        // Broadest possible selectors
+        let item_selector = Selector::parse(".movie-list > div, .item, .column, .box, .grid-item").unwrap();
+        let url_selector = Selector::parse("a").unwrap();
 
-        let urls: Vec<String> = document
-            .select(&url_selector)
-            .filter_map(|el| el.value().attr("href"))
-            .map(|s| s.to_string())
-            .collect();
+        let mut results = Vec::new();
 
-        let titles: Vec<String> = document
-            .select(&title_selector)
-            .map(|el| el.text().collect::<String>())
-            .collect();
+        for item in document.select(&item_selector) {
+            let a_tags = item.select(&url_selector).collect::<Vec<_>>();
+            for a in a_tags {
+                if let Some(href) = a.value().attr("href") {
+                    if href.starts_with("/v/") {
+                        let text = item.text().collect::<String>().to_uppercase();
+                        results.push((href.to_string(), text));
+                    }
+                }
+            }
+        }
+
+        // If no results from structured search, try finding ANY link starting with /v/
+        if results.is_empty() {
+            let all_links = Selector::parse("a[href^='/v/']").unwrap();
+            for a in document.select(&all_links) {
+                let href = a.value().attr("href").unwrap();
+                let text = a.text().collect::<String>().to_uppercase();
+                let title_attr = a.value().attr("title").unwrap_or_default().to_uppercase();
+                results.push((href.to_string(), format!("{} {}", text, title_attr)));
+            }
+        }
 
         // Find matching URL
-        let correct_url = if let Some(pos) = titles
+        let correct_url = if let Some((url, _)) = results
             .iter()
-            .position(|t| t.to_uppercase() == number.to_uppercase())
+            .find(|(_, t)| {
+                let t_clean = t.replace("-", "").replace("_", "");
+                t_clean.contains(&clean_number) || clean_number.contains(&t_clean)
+            })
         {
-            urls.get(pos)
-                .ok_or_else(|| anyhow!("URL not found for number: {}", number))?
-        } else if !urls.is_empty()
-            && !titles.is_empty()
-            && titles[0].to_uppercase() == number.to_uppercase()
-        {
-            &urls[0]
+            url
+        } else if !results.is_empty() {
+            // Last resort: if the results list is small, or the search was specific, pick the first one
+            &results[0].0
         } else {
-            return Err(anyhow!("Movie not found in javdb: {}", number));
+            return Err(anyhow!("Movie not found in javdb (no results): {}", number));
         };
 
         Ok(format!("https://{}.com{}", self.site, correct_url))
@@ -89,11 +120,20 @@ impl JavdbScraper {
     pub fn scrape(&self, number: &str) -> Result<Movie> {
         let detail_url = self.search_movie(number)?;
 
-        let response = self
-            .client
-            .get(&detail_url)
-            .header("Cookie", "over18=1; theme=auto; locale=zh")
-            .send()?;
+        let mut request = self.client.get(&detail_url);
+        
+        let mut cookie_str = "over18=1; theme=auto; locale=zh".to_string();
+        if let Some(ref c) = self.cookie {
+            cookie_str = format!("{}; {}", cookie_str, c);
+        }
+        request = request.header("Cookie", cookie_str);
+
+        let response = request.send()?;
+
+        if response.status() == reqwest::StatusCode::FORBIDDEN {
+            eprintln!("Error: 403 Forbidden when accessing JavDB details. This usually means Cloudflare protection is active.");
+            return Err(anyhow!("JavDB details access forbidden (403)."));
+        }
 
         let html = response.text()?;
 

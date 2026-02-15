@@ -52,6 +52,81 @@ pub struct MovieData {
     pub markers: Vec<f64>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WebDavMovieData {
+    pub url_path: String, // Path relative to WebDAV base
+    pub movie: Movie,
+    pub added_time: SystemTime,
+    pub fav: bool,
+    #[serde(default)]
+    pub markers: Vec<f64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct WebDavConfig {
+    pub base_url: String,
+    #[serde(skip)]
+    pub user: Option<String>,
+    #[serde(skip)]
+    pub pass: Option<String>,
+    pub movies: Vec<WebDavMovieData>,
+}
+
+#[derive(Debug, Default)]
+pub struct WebDavDatabase {
+    pub config: WebDavConfig,
+}
+
+impl WebDavDatabase {
+    pub fn new() -> Result<Self> {
+        let config_path = Self::config_path();
+        let mut config: WebDavConfig = if !config_path.exists() {
+            WebDavConfig::default()
+        } else {
+            let content = std::fs::read_to_string(config_path)?;
+            serde_json::from_str(&content)?
+        };
+
+        if config.base_url.is_empty() {
+            if let Some(url) = dirs::WEBDAV_URL.clone() {
+                config.base_url = url;
+            }
+        }
+        if config.user.is_none() {
+            config.user = dirs::WEBDAV_USER.clone();
+        }
+        if config.pass.is_none() {
+            config.pass = dirs::WEBDAV_PASS.clone();
+        }
+
+        Ok(Self { config })
+    }
+
+    #[inline]
+    fn config_path() -> PathBuf {
+        dirs::DIR.config_local_dir().join("kwa_db.json")
+    }
+
+    pub fn flush(&self) {
+        let config_path = Self::config_path();
+        if let Ok(content) = serde_json::to_string(&self.config) {
+            std::fs::write(config_path, content).ok();
+        }
+    }
+
+    pub fn get_movie(&self, i: usize) -> Option<&WebDavMovieData> {
+        self.config.movies.get(i)
+    }
+
+    pub fn toggle_fav(&mut self, i: usize) -> bool {
+        if let Some(movie) = self.config.movies.get_mut(i) {
+            movie.fav = !movie.fav;
+            return movie.fav;
+        }
+        false
+    }
+}
+
 #[derive(Debug)]
 pub struct SimpleJsonDatabase {
     pub config: Config,

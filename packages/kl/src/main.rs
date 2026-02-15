@@ -23,6 +23,33 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Scrape files from WebDAV
+    Webdav {
+        /// Remote path to scrape
+        #[arg(default_value = "/")]
+        path: String,
+
+        /// Only list files that would be scraped, without performing any action
+        #[arg(short, long)]
+        list_only: bool,
+
+        /// WebDAV base URL (overrides ENV and DB)
+        #[arg(long)]
+        url: Option<String>,
+
+        /// WebDAV username (overrides ENV and DB)
+        #[arg(short, long)]
+        user: Option<String>,
+
+        /// WebDAV password (overrides ENV and DB)
+        #[arg(short, long)]
+        pass: Option<String>,
+
+        /// JavDB cookie (overrides ENV)
+        #[arg(short, long)]
+        cookie: Option<String>,
+    },
+
     /// Fix database issues like broken thumbnails
     FixDb {
         /// Perform a trial run without changes
@@ -40,6 +67,16 @@ enum Commands {
         /// List items that need fixing without taking action
         #[arg(long)]
         list_need_fix: bool,
+    },
+
+    /// Test scrape a single ID without saving or downloading anything
+    TestScrape {
+        /// The ID to scrape (e.g., SSIS-123 or FC2-123456)
+        id: String,
+
+        /// JavDB cookie (overrides ENV)
+        #[arg(short, long)]
+        cookie: Option<String>,
     },
 }
 
@@ -59,7 +96,49 @@ fn main() -> anyhow::Result<()> {
             let output_path = output.unwrap_or_else(|| dirs::SEARCH_PATH.to_path_buf());
             run_scraper(input, output_path)?;
         }
+        Commands::Webdav { url, user, pass, path, list_only, cookie } => {
+            run_webdav_scraper(url, user, pass, path, list_only, cookie)?;
+        }
+        Commands::TestScrape { id, cookie } => {
+            run_test_scrape(&id, cookie)?;
+        }
     }
+    Ok(())
+}
+
+fn run_test_scrape(id: &str, cookie: Option<String>) -> anyhow::Result<()> {
+    println!("Testing scrape for ID: {}", id);
+    let cookie = cookie.or_else(|| dirs::JAVDB_COOKIE.clone());
+    let javdb = kl::javdb::JavdbScraper::with_cookie(cookie)?;
+    let fc2 = kl::fc2::Fc2Scraper::new()?;
+
+    let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
+        &fc2
+    } else {
+        &javdb
+    };
+
+    match scraper.scrape(id) {
+        Ok(movie) => {
+            println!("--- Scrape Result ---");
+            println!("Title:      {}", movie.title);
+            println!("Number:     {}", movie.num.as_deref().unwrap_or("-"));
+            println!("Release:    {}", movie.releasedate.as_deref().unwrap_or("-"));
+            println!("Label:      {}", movie.label.as_deref().unwrap_or("-"));
+            println!("Actors:     {}", movie.actor.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "));
+            println!("Genres:     {}", movie.genre.as_ref().map(|g| g.join(", ")).unwrap_or_default());
+            println!("Tags:       {}", movie.tag.as_ref().map(|t| t.join(", ")).unwrap_or_default());
+            println!("Poster URL: {}", movie.poster.as_deref().unwrap_or("-"));
+            println!("Thumb URL:  {}", movie.thumb.as_deref().unwrap_or("-"));
+            println!("Cover URL:  {}", movie.cover.as_deref().unwrap_or("-"));
+            println!("Website:    {}", movie.website.as_deref().unwrap_or("-"));
+            println!("--- End of Result ---");
+        }
+        Err(e) => {
+            eprintln!("Scrape failed: {}", e);
+        }
+    }
+
     Ok(())
 }
 
@@ -344,6 +423,190 @@ fn update_nfo_file(movie_data: &kr::db::MovieData) {
     if let Ok(xml) = kl::generate_nfo_xml(&movie_data.movie) {
         let _ = fs::write(&movie_data.path, xml);
     }
+}
+
+fn run_webdav_scraper(
+    url: Option<String>,
+    user: Option<String>,
+    pass: Option<String>,
+    remote_path: String,
+    list_only: bool,
+    cookie: Option<String>,
+) -> anyhow::Result<()> {
+    let mut db = kr::db::WebDavDatabase::new()?;
+
+    // Update DB config only if provided
+    if let Some(u) = url {
+        db.config.base_url = u;
+    }
+    if user.is_some() {
+        db.config.user = user;
+    }
+    if pass.is_some() {
+        db.config.pass = pass;
+    }
+
+    if db.config.base_url.is_empty() {
+        if let Some(u) = dirs::WEBDAV_URL.clone() {
+            db.config.base_url = u;
+        }
+    }
+    if db.config.user.is_none() {
+        db.config.user = dirs::WEBDAV_USER.clone();
+    }
+    if db.config.pass.is_none() {
+        db.config.pass = dirs::WEBDAV_PASS.clone();
+    }
+
+    if db.config.base_url.is_empty() {
+        return Err(anyhow::anyhow!(
+            "WebDAV URL is not set. Please provide it via --url or KK_WEBDAV_URL env var."
+        ));
+    }
+
+    let client = kwa::WebDavClient::new(
+        &db.config.base_url,
+        db.config.user.clone().zip(db.config.pass.clone()),
+    )?;
+
+    let cookie = cookie.or_else(|| dirs::JAVDB_COOKIE.clone());
+
+    if list_only {
+        println!("Dry run mode: Listing files to be scraped from {}", remote_path);
+        recursive_scan_webdav(&client, &remote_path, &mut db, None, None, &PathBuf::new(), 0, true, cookie)?;
+        return Ok(());
+    }
+
+    let javdb = kl::javdb::JavdbScraper::with_cookie(cookie.clone())?;
+    let fc2 = kl::fc2::Fc2Scraper::new()?;
+    let cache_dir = dirs::DIR.cache_dir().join("thumbs");
+    if !cache_dir.exists() {
+        fs::create_dir_all(&cache_dir)?;
+    }
+
+    // Use a queue for breadth-first search or just recursion. Let's use a recursive helper.
+    recursive_scan_webdav(&client, &remote_path, &mut db, Some(&javdb), Some(&fc2), &cache_dir, 0, false, cookie)?;
+
+    db.flush();
+    println!("WebDAV database flushed.");
+    Ok(())
+}
+
+fn recursive_scan_webdav(
+    client: &kwa::WebDavClient,
+    path: &str,
+    db: &mut kr::db::WebDavDatabase,
+    javdb: Option<&kl::javdb::JavdbScraper>,
+    fc2: Option<&kl::fc2::Fc2Scraper>,
+    cache_dir: &std::path::Path,
+    depth: usize,
+    list_only: bool,
+    cookie: Option<String>,
+) -> anyhow::Result<()> {
+    // Limit depth to prevent infinite loops, but 5 should be plenty for "at least two levels"
+    if depth > 5 {
+        return Ok(());
+    }
+
+    println!("Scanning WebDAV path: {}", path);
+    let resources = match client.list(path) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("  Failed to list {}: {}", path, e);
+            return Ok(());
+        }
+    };
+
+    for res in resources {
+        // WebDAV list often includes the directory itself in the response
+        if res.path == path || res.path == format!("{}/", path) || format!("{}/", res.path) == path {
+            continue;
+        }
+
+        if res.is_dir {
+            recursive_scan_webdav(client, &res.path, db, javdb, fc2, cache_dir, depth + 1, list_only, cookie.clone())?;
+            continue;
+        }
+
+        let p = std::path::Path::new(&res.path);
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if !["mp4", "mkv", "avi", "wmv", "mov", "rmvb"].contains(&ext.as_str()) {
+            continue;
+        }
+
+        // Skip files smaller than 200MB
+        if let Some(size) = res.size {
+            if size < 200 * 1024 * 1024 {
+                continue;
+            }
+        }
+
+        if list_only {
+            if let Some(number) = kl::number_parser::get_number(p) {
+                println!("  [Found] ID: {:<12} | Path: {}", number, res.path);
+            } else {
+                println!("  [Skip]  No ID found  | Path: {}", res.path);
+            }
+            continue;
+        }
+
+        // Already in DB?
+        if db.config.movies.iter().any(|m| m.url_path == res.path) {
+            continue;
+        }
+
+        println!("Processing remote file: {}", res.path);
+        if let Some(number) = kl::number_parser::get_number(p) {
+            println!("  Found ID: {}", number);
+
+            let scraper: &dyn Scraper = if number.to_uppercase().starts_with("FC2") {
+                fc2.unwrap()
+            } else {
+                javdb.unwrap()
+            };
+
+            match scraper.scrape(&number) {
+                Ok(mut movie) => {
+                    println!("  Scraped: {}", movie.title);
+
+                    // Download images to local cache
+                    let global_thumb_path = cache_dir.join(format!("{}.jpg", number));
+                    if let Some(poster_url) = &movie.poster {
+                        match reqwest::blocking::get(poster_url) {
+                            Ok(response) => {
+                                if let Ok(bytes) = response.bytes() {
+                                    if let Err(e) = fs::write(&global_thumb_path, &bytes) {
+                                        eprintln!("  Failed to write to cache: {}", e);
+                                    } else {
+                                        println!("  Cached thumb: {:?}", global_thumb_path);
+                                        movie.thumb =
+                                            Some(global_thumb_path.to_string_lossy().to_string());
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("  Failed to download poster: {}", e),
+                        }
+                    }
+
+                    db.config.movies.push(kr::db::WebDavMovieData {
+                        url_path: res.path,
+                        movie,
+                        added_time: std::time::SystemTime::now(),
+                        fav: false,
+                        markers: Vec::new(),
+                    });
+                }
+                Err(e) => eprintln!("  Scrape failed: {}", e),
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    }
+
+    Ok(())
 }
 
 fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {

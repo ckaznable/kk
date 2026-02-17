@@ -522,6 +522,8 @@ async fn run_webdav_scraper(
         ));
     }
 
+    let local_db = kr::db::SimpleJsonDatabase::new().ok();
+
     let client = kwa::WebDavClient::new(
         &db.config.base_url,
         db.config.user.clone().zip(db.config.pass.clone()),
@@ -531,7 +533,7 @@ async fn run_webdav_scraper(
 
     if list_only {
         println!("Dry run mode: Listing files to be scraped from {}", remote_path);
-        recursive_scan_webdav(&client, &remote_path, &mut db, None, None, &PathBuf::new(), 0, true, cookie, None).await?;
+        recursive_scan_webdav(&client, &remote_path, &mut db, local_db.as_ref(), None, None, &PathBuf::new(), 0, true, cookie, None).await?;
         return Ok(());
     }
 
@@ -557,6 +559,7 @@ async fn run_webdav_scraper(
         &client, 
         &remote_path, 
         &mut db, 
+        local_db.as_ref(),
         Some(&javdb), 
         Some(&fc2), 
         &cache_dir, 
@@ -580,6 +583,7 @@ async fn recursive_scan_webdav(
     client: &kwa::WebDavClient,
     path: &str,
     db: &mut kr::db::WebDavDatabase,
+    local_db: Option<&kr::db::SimpleJsonDatabase>,
     javdb: Option<&kl::javdb::JavdbScraper>,
     fc2: Option<&kl::fc2::Fc2Scraper>,
     cache_dir: &std::path::Path,
@@ -609,7 +613,7 @@ async fn recursive_scan_webdav(
         }
 
         if res.is_dir {
-            recursive_scan_webdav(client, &res.path, db, javdb, fc2, cache_dir, depth + 1, list_only, cookie.clone(), browser).await?;
+            recursive_scan_webdav(client, &res.path, db, local_db, javdb, fc2, cache_dir, depth + 1, list_only, cookie.clone(), browser).await?;
             continue;
         }
 
@@ -662,9 +666,22 @@ async fn recursive_scan_webdav(
         if let Some(num) = number {
             println!("  Found ID: {}", num);
 
-            let scrape_result = if let Some((scraper, session)) = browser {
+            let mut existing_movie = None;
+            if let Some(local) = local_db {
+                if let Some(m) = local.find_movie_by_id(&num) {
+                    println!("  Found in local database, reusing metadata.");
+                    existing_movie = Some(m.clone());
+                }
+            }
+
+            let mut did_scrape = false;
+            let scrape_result = if let Some(m) = existing_movie {
+                Ok(m)
+            } else if let Some((scraper, session)) = browser {
+                did_scrape = true;
                 scraper.scrape_session(session, &num, !num.to_uppercase().starts_with("FC2")).await
             } else {
+                did_scrape = true;
                 let scraper: &dyn Scraper = if num.to_uppercase().starts_with("FC2") {
                     fc2.unwrap()
                 } else {
@@ -679,21 +696,27 @@ async fn recursive_scan_webdav(
 
                     // Download images to local cache
                     let global_thumb_path = cache_dir.join(format!("{}.jpg", num));
-                    if let Some(poster_url) = &movie.poster {
-                        match reqwest::get(poster_url).await {
-                            Ok(response) => {
-                                if let Ok(bytes) = response.bytes().await {
-                                    if let Err(e) = fs::write(&global_thumb_path, &bytes) {
-                                        eprintln!("  Failed to write to cache: {}", e);
-                                    } else {
-                                        println!("  Cached thumb: {:?}", global_thumb_path);
-                                        movie.thumb =
-                                            Some(global_thumb_path.to_string_lossy().to_string());
+                    if !global_thumb_path.exists() {
+                        if let Some(poster_url) = &movie.poster {
+                            if poster_url.starts_with("http") {
+                                match reqwest::get(poster_url).await {
+                                    Ok(response) => {
+                                        if let Ok(bytes) = response.bytes().await {
+                                            if let Err(e) = fs::write(&global_thumb_path, &bytes) {
+                                                eprintln!("  Failed to write to cache: {}", e);
+                                            } else {
+                                                println!("  Cached thumb: {:?}", global_thumb_path);
+                                            }
+                                        }
                                     }
+                                    Err(e) => eprintln!("  Failed to download poster: {}", e),
                                 }
                             }
-                            Err(e) => eprintln!("  Failed to download poster: {}", e),
                         }
+                    }
+
+                    if global_thumb_path.exists() {
+                        movie.thumb = Some(global_thumb_path.to_string_lossy().to_string());
                     }
 
                     db.config.movies.push(kr::db::WebDavMovieData {
@@ -709,7 +732,9 @@ async fn recursive_scan_webdav(
                 }
                 Err(e) => eprintln!("  Scrape failed: {}", e),
             }
-            thread::sleep(Duration::from_secs(6));
+            if did_scrape {
+                thread::sleep(Duration::from_secs(6));
+            }
         }
     }
 
@@ -730,6 +755,8 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
     let mut db = kr::db::SimpleJsonDatabase::new()
         .map_err(|e| anyhow::anyhow!("Failed to load database: {}", e))?;
 
+    let dav_db = kr::db::WebDavDatabase::new().ok();
+
     let javdb = kl::javdb::JavdbScraper::new()?;
     let fc2 = kl::fc2::Fc2Scraper::new()?;
 
@@ -743,19 +770,34 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                     if let Some(number) = kl::number_parser::get_number(path) {
                         println!("  Found ID: {}", number);
 
+                        let mut existing_movie = None;
+                        if let Some(dav) = &dav_db {
+                            if let Some(m) = dav.find_movie_by_id(&number) {
+                                println!("  Found in WebDAV database, reusing metadata.");
+                                existing_movie = Some(m.clone());
+                            }
+                        }
+
                         let filename_starts_fc2 = path
                             .file_name()
                             .map(|n| n.to_string_lossy().to_lowercase().starts_with("fc2"))
                             .unwrap_or(false);
 
-                        let scraper: &dyn Scraper =
-                            if number.to_uppercase().starts_with("FC2") || filename_starts_fc2 {
-                                &fc2
-                            } else {
-                                &javdb
-                            };
+                        let mut did_scrape = false;
+                        let scrape_result = if let Some(m) = existing_movie {
+                            Ok(m)
+                        } else {
+                            did_scrape = true;
+                            let scraper: &dyn Scraper =
+                                if number.to_uppercase().starts_with("FC2") || filename_starts_fc2 {
+                                    &fc2
+                                } else {
+                                    &javdb
+                                };
+                            scraper.scrape(&number).await
+                        };
 
-                        match scraper.scrape(&number).await {
+                        match scrape_result {
                             Ok(mut movie) => {
                                 println!("  Scraped: {}", movie.title);
 
@@ -822,37 +864,42 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                 if let Some(poster_url) = &movie.poster {
                                     // Download poster to movie dir
                                     let img_path = movie_dir.join(format!("{}-poster.jpg", number));
-                                    match reqwest::get(poster_url).await {
-                                        Ok(response) => {
-                                            if let Ok(bytes) = response.bytes().await {
-                                                if let Ok(mut file) = fs::File::create(&img_path) {
-                                                    file.write_all(&bytes).ok();
-                                                    println!("  Saved Poster: {:?}", img_path);
 
-                                                    // Copy to global cache
-                                                    if let Err(e) =
-                                                        fs::write(&global_thumb_path, &bytes)
-                                                    {
-                                                        eprintln!(
-                                                            "  Failed to write to cache: {}",
-                                                            e
-                                                        );
-                                                    } else {
-                                                        println!(
-                                                            "  Cached thumb: {:?}",
-                                                            global_thumb_path
-                                                        );
-                                                        // Update movie thumb to point to cache
-                                                        movie.thumb = Some(
-                                                            global_thumb_path
-                                                                .to_string_lossy()
-                                                                .to_string(),
-                                                        );
+                                    let mut downloaded = false;
+                                    if global_thumb_path.exists() && !img_path.exists() {
+                                        if let Ok(_) = fs::copy(&global_thumb_path, &img_path) {
+                                            println!("  Copied Poster from cache: {:?}", img_path);
+                                            downloaded = true;
+                                        }
+                                    }
+
+                                    if !downloaded && poster_url.starts_with("http") {
+                                        match reqwest::get(poster_url).await {
+                                            Ok(response) => {
+                                                if let Ok(bytes) = response.bytes().await {
+                                                    if let Ok(mut file) = fs::File::create(&img_path) {
+                                                        file.write_all(&bytes).ok();
+                                                        println!("  Saved Poster: {:?}", img_path);
+                                                        downloaded = true;
+
+                                                        // Copy to global cache if not there
+                                                        if !global_thumb_path.exists() {
+                                                            if let Err(e) = fs::write(&global_thumb_path, &bytes) {
+                                                                eprintln!("  Failed to write to cache: {}", e);
+                                                            } else {
+                                                                println!("  Cached thumb: {:?}", global_thumb_path);
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
+                                            Err(e) => eprintln!("  Failed to download poster: {}", e),
                                         }
-                                        Err(e) => eprintln!("  Failed to download poster: {}", e),
+                                    }
+
+                                    if downloaded || global_thumb_path.exists() {
+                                        movie.thumb = Some(global_thumb_path.to_string_lossy().to_string());
+                                        movie.poster = Some(img_path.to_string_lossy().to_string());
                                     }
                                 }
 
@@ -879,8 +926,10 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                             }
                         }
 
-                        // Add delay to avoid rate limiting
-                        thread::sleep(Duration::from_secs(6));
+                        // Add delay to avoid rate limiting if we actually scraped
+                        if did_scrape {
+                            thread::sleep(Duration::from_secs(6));
+                        }
                     } else {
                         println!("  Could not extract ID from filename");
                     }

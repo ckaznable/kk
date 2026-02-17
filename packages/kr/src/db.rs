@@ -127,14 +127,19 @@ impl WebDavDatabase {
     }
 
     pub fn contains_id(&self, id: &str) -> bool {
+        self.find_movie_by_id(id).is_some()
+    }
+
+    pub fn find_movie_by_id(&self, id: &str) -> Option<&Movie> {
         let clean_id = id.to_uppercase().replace("-", "").replace("_", "");
-        self.config.movies.iter().any(|m| {
+        self.config.movies.iter().find_map(|m| {
             if let Some(ref num) = m.movie.num {
                 let clean_num = num.to_uppercase().replace("-", "").replace("_", "");
-                clean_num == clean_id
-            } else {
-                false
+                if clean_num == clean_id {
+                    return Some(&m.movie);
+                }
             }
+            None
         })
     }
 }
@@ -338,6 +343,19 @@ impl SimpleJsonDatabase {
 
     pub fn get_movie(&self, i: usize) -> Option<&MovieData> {
         self.config.movies.get(i)
+    }
+
+    pub fn find_movie_by_id(&self, id: &str) -> Option<&Movie> {
+        let clean_id = id.to_uppercase().replace("-", "").replace("_", "");
+        self.config.movies.iter().find_map(|m| {
+            if let Some(ref num) = m.movie.num {
+                let clean_num = num.to_uppercase().replace("-", "").replace("_", "");
+                if clean_num == clean_id {
+                    return Some(&m.movie);
+                }
+            }
+            None
+        })
     }
 
     /// Toggle the favorite status of a movie at the given index

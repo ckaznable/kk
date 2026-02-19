@@ -237,6 +237,11 @@ mp.add_forced_key_binding("MBTN_MID", "middle_click_jump", function()
     reset_activity()
 end)
 
+-- Right click: return to menu
+mp.add_forced_key_binding("MBTN_RIGHT", "right_click_menu", function()
+    mp.commandv("script-message", "rust_right_click")
+end)
+
 mp.observe_property("mouse-pos", "native", reset_activity)
 mp.observe_property("time-pos", "number", draw_ui)
 mp.observe_property("osd-dimensions", "native", draw_ui)

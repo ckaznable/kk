@@ -137,6 +137,9 @@ fn main() {
                                     }
                                 }
                             }
+                            "rust_right_click" => {
+                                app_tx.send(AppHandleEvent::GoToMenu);
+                            }
                             _ => {}
                         }
                         println!("{args:?}");

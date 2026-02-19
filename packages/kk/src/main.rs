@@ -718,7 +718,11 @@ fn query_menu_items(
     mode: &MenuMode,
 ) -> Vec<crate::ui::browse::RenderItem> {
     if matches!(mode, MenuMode::WebDav) {
-        return wd_db.borrow().config.movies.iter().enumerate()
+        let wd = wd_db.borrow();
+        let mut items: Vec<_> = wd.config.movies.iter().enumerate().collect();
+        items.sort_by(|(_, a), (_, b)| b.added_time.cmp(&a.added_time));
+        return items
+            .into_iter()
             .map(|(i, m)| (i, m).into())
             .collect();
     }

@@ -48,6 +48,12 @@ enum MpvEvent {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        std::env::set_var("FLTK_BACKEND", "x11");
+        std::env::set_var("WAYLAND_DISPLAY", "");
+    }
+
     let mut db = kr::init();
     db.load_config(&SEARCH_PATH).ok();
     let db = Rc::new(RefCell::new(db));
@@ -75,7 +81,7 @@ fn main() {
     let video_group = Group::default()
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
         .with_pos(0, 0);
-    let video_layer = mpv_window();
+    let mut video_layer = mpv_window();
     video_group.end();
 
     wizard.end();
@@ -83,6 +89,9 @@ fn main() {
 
     win.end();
     win.show();
+
+    #[cfg(target_os = "linux")]
+    video_layer.show();
 
     let wid = video_layer.raw_handle() as i64;
 
@@ -636,8 +645,22 @@ fn main() {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn mpv_window() -> GlWindow {
     let mut video_layer = GlWindow::default()
+        .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
+        .with_label("");
+    video_layer.set_color(Color::Black);
+    video_layer.make_resizable(true);
+    video_layer.set_border(false);
+    video_layer.end();
+
+    video_layer
+}
+
+#[cfg(target_os = "linux")]
+fn mpv_window() -> Window {
+    let mut video_layer = Window::default()
         .with_size(INIT_WIN_WIDTH, INIT_WIN_HEIGHT)
         .with_label("");
     video_layer.set_color(Color::Black);

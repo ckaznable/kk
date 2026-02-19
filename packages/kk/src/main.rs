@@ -345,21 +345,21 @@ fn main() {
 
                                                 // Clicked on empty area: Show global context menu
 
-                                                                            let global_items = menu::MenuItem::new(&["WebDAV", "Local"]);
+                                                let global_items = menu::MenuItem::new(&["WebDAV", "Local"]);
 
-                                                                            if let Some(val) = global_items.popup(x, y) {
+                                                if let Some(val) = global_items.popup(x, y) {
 
-                                                                                match val.label().unwrap_or_default().as_str() {
+                                                    match val.label().unwrap_or_default().as_str() {
 
-                                                                                    "WebDAV" => draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), MenuMode::WebDav),
+                                                        "WebDAV" => draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), MenuMode::WebDav),
 
-                                                                                    "Local" => draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), MenuMode::AddedTime),
+                                                        "Local" => draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), MenuMode::AddedTime),
 
-                                                                                    _ => {}
+                                                        _ => {}
 
-                                                                                }
+                                                    }
 
-                                                                            }
+                                                }
 
                                                 
 

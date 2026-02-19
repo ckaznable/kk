@@ -4,6 +4,14 @@ use directories::ProjectDirs;
 
 pub static DIR: LazyLock<ProjectDirs> = LazyLock::new(|| ProjectDirs::from("", "", "kk").unwrap());
 
+pub static THUMB_CACHE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let dir = DIR.cache_dir().join("thumbs");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).ok();
+    }
+    dir
+});
+
 pub static SEARCH_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     let search_path = env::var("KK_SEARCH_PATH").expect("KK_SEARCH_PATH env variable is required");
     PathBuf::from(search_path)

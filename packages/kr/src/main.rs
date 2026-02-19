@@ -65,15 +65,14 @@ fn dedupe() -> Result<()> {
 
 fn cache() -> Result<()> {
     let mut db = SimpleJsonDatabase::new()?;
-    let cache_dir = DIR.cache_dir().join("thumbs");
-    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cache_dir = &*dirs::THUMB_CACHE_DIR;
 
     db.config
         .movies
         .clone()
         .iter()
         .enumerate()
-        .filter_map(|(i, movie)| Some((i, movie.path.parent()?.join(movie.movie.thumb.clone()?))))
+        .filter_map(|(i, movie)| Some((i, movie.abs_path().parent()?.join(movie.movie.thumb.clone()?))))
         .for_each(|(i, path)| {
             let Some(ext) = path.extension() else {
                 println!("{:?} ext name not found", path);
@@ -88,7 +87,7 @@ fn cache() -> Result<()> {
                 .to_str()
                 .unwrap();
             let filename = format!("{}.{}", name, ext.to_str().unwrap());
-            let dst = cache_dir.join(filename);
+            let dst = cache_dir.join(&filename);
             if dst.exists() {
                 return;
             }
@@ -98,7 +97,7 @@ fn cache() -> Result<()> {
                 return;
             };
 
-            db.config.movies[i].movie.thumb = Some(dst.to_string_lossy().to_string());
+            db.config.movies[i].movie.thumb = Some(filename);
         });
 
     db.flush();
@@ -110,7 +109,8 @@ fn dup_num() -> Result<()> {
     let mut num_map: HashMap<String, Vec<String>> = HashMap::new();
 
     for movie in &db.config.movies {
-        let Some(stem) = movie.path.file_stem().and_then(|s| s.to_str()) else {
+        let abs_path = movie.abs_path();
+        let Some(stem) = abs_path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
 
@@ -124,16 +124,7 @@ fn dup_num() -> Result<()> {
             }
         }
 
-        let abs_path = if movie.path.is_absolute() {
-            movie.path.to_string_lossy().to_string()
-        } else {
-            std::fs::canonicalize(&movie.path)
-                .unwrap_or(movie.path.clone())
-                .to_string_lossy()
-                .to_string()
-        };
-
-        num_map.entry(stem_lower).or_default().push(abs_path);
+        num_map.entry(stem_lower).or_default().push(abs_path.to_string_lossy().to_string());
     }
 
     let mut dup_count = 0;

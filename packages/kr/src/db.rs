@@ -52,6 +52,39 @@ pub struct MovieData {
     pub markers: Vec<f64>,
 }
 
+impl MovieData {
+    pub fn abs_path(&self) -> PathBuf {
+        if self.path.is_absolute() {
+            self.path.clone()
+        } else {
+            dirs::SEARCH_PATH.join(&self.path)
+        }
+    }
+
+    pub fn abs_thumb_path(&self) -> Option<PathBuf> {
+        let thumb = self.movie.thumb.as_ref()?;
+        let p = PathBuf::from(thumb);
+        if p.is_absolute() {
+            return Some(p);
+        }
+
+        // Try cache first
+        let cache_path = dirs::THUMB_CACHE_DIR.join(&p);
+        if cache_path.exists() {
+            return Some(cache_path);
+        }
+
+        // Fallback to NFO relative path
+        let nfo_abs = self.abs_path();
+        let nfo_relative = nfo_abs.parent()?.join(&p);
+        if nfo_relative.exists() {
+            return Some(nfo_relative);
+        }
+
+        Some(cache_path) // return cache path even if not exists as a default
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WebDavMovieData {
     pub url_path: String, // Path relative to WebDAV base
@@ -186,7 +219,7 @@ impl SimpleJsonDatabase {
     pub fn load(path: &Path) -> Result<Config> {
         let mut config = Self::init_config()?;
         let known_files: AHashSet<PathBuf> =
-            config.movies.iter().map(|item| item.path.clone()).collect();
+            config.movies.iter().map(|item| item.abs_path()).collect();
 
         let now = SystemTime::now();
         let new_nfos = find_new_movie_nfo(path, config.last_scan_time, &known_files)?;
@@ -221,8 +254,10 @@ impl SimpleJsonDatabase {
             return None;
         };
 
+        let path = path.strip_prefix(&*dirs::SEARCH_PATH).unwrap_or(path).to_owned();
+
         Some(MovieData {
-            path: path.to_owned(),
+            path,
             movie,
             added_time,
             fav: false,
@@ -242,7 +277,7 @@ impl SimpleJsonDatabase {
     }
 
     pub fn reload(&mut self) {
-        if let Ok(config) = Self::load(&Self::config_path()) {
+        if let Ok(config) = Self::init_config() {
             self.config = config;
             self.order_by_fav_index.dirty = true;
             self.order_by_added_time_index.dirty = true;

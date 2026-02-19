@@ -65,11 +65,8 @@ impl TryFrom<IndexedMovieData<'_>> for RenderItem {
     type Error = ();
 
     fn try_from(value: IndexedMovieData<'_>) -> Result<Self, Self::Error> {
-        let nfo_path = value.movie.path.clone();
-        let img_path = nfo_path
-            .parent()
-            .ok_or(())?
-            .join(value.movie.movie.thumb.clone().ok_or(())?);
+        let nfo_path = value.movie.abs_path();
+        let img_path = value.movie.abs_thumb_path().ok_or(())?;
 
         Ok(Self {
             path: nfo_path.to_string_lossy().to_string(),

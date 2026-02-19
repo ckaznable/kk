@@ -212,104 +212,100 @@ async fn run_fix_db(
     );
     println!("Loaded {} movies from database.", len);
 
-    let cache_dir = dirs::DIR.cache_dir().join("thumbs");
-    if !cache_dir.exists() {
-        fs::create_dir_all(&cache_dir)?;
-    }
-    // println!("Cache thumbs dir: {:?}", cache_dir); // Valid but reduces noise for list mode?
-
-    for i in 0..len {
-        let mut needs_rescrape = false;
-        // Analyze current state
-        let mut target_download_url: Option<String> = None;
-
-        // Information for reporting
-        let movie_title = db.config.movies[i].movie.title.clone();
-        let movie_num_opt = db.config.movies[i].movie.num.clone();
-
-        // Extract ID for cache filename
-        let file_stem_for_id;
-        {
-            // We need to extract file stem early because borrow checker
-            let p = &db.config.movies[i].path;
-            file_stem_for_id = p.file_stem().unwrap().to_string_lossy().to_string();
-        }
-
-        // Try getting ID from movie.num, fallback to file_stem
-        let movie_num = movie_num_opt.clone();
-        let cache_id = movie_num
-            .clone()
-            .unwrap_or_else(|| file_stem_for_id.clone());
-        let cache_thumb_path = cache_dir.join(format!("{}.jpg", cache_id)); // Using .jpg by convention
-
-        {
-            if let Some(movie_data) = db.config.movies.get(i) {
-                if let Some(thumb) = &movie_data.movie.thumb {
-                    if thumb.starts_with("http") {
-                        target_download_url = Some(thumb.clone());
-                    } else if thumb.ends_with(".com") || thumb.contains(".com/") {
-                        // println!("Suspicious thumb (URL-like): {}", thumb);
-                        if thumb.contains("/") {
-                            target_download_url = Some(if thumb.starts_with("//") {
-                                format!("https:{}", thumb)
-                            } else {
-                                format!("https://{}", thumb)
-                            });
-                        } else {
-                            needs_rescrape = true;
-                        }
-                    } else {
-                        // Check local
-                        let p = PathBuf::from(thumb);
-                        if !p.exists() {
-                            // println!("Missing local thumb: {:?}", p);
-                            needs_rescrape = true;
-                        } else {
-                            if let Some(ext) = p.extension() {
-                                let ext_s = ext.to_string_lossy().to_lowercase();
-                                if !["jpg", "jpeg", "png", "gif", "webp"].contains(&ext_s.as_str())
-                                {
-                                    // println!("Invalid thumb extension: {:?}", p);
+        let cache_dir = &*dirs::THUMB_CACHE_DIR;
+        // println!("Cache thumbs dir: {:?}", cache_dir); // Valid but reduces noise for list mode?
+    
+        for i in 0..len {
+            let mut needs_rescrape = false;
+            // Analyze current state
+            let mut target_download_url: Option<String> = None;
+    
+            // Information for reporting
+            let movie_title = db.config.movies[i].movie.title.clone();
+            let movie_num_opt = db.config.movies[i].movie.num.clone();
+    
+            // Extract ID for cache filename
+            let file_stem_for_id;
+            {
+                // We need to extract file stem early because borrow checker
+                let p = db.config.movies[i].abs_path();
+                file_stem_for_id = p.file_stem().unwrap().to_string_lossy().to_string();
+            }
+    
+            // Try getting ID from movie.num, fallback to file_stem
+            let movie_num = movie_num_opt.clone();
+            let cache_id = movie_num
+                .clone()
+                .unwrap_or_else(|| file_stem_for_id.clone());
+            let thumb_filename = format!("{}.jpg", cache_id); // Using .jpg by convention
+            let cache_thumb_path = cache_dir.join(&thumb_filename);
+                    {
+                    if let Some(movie_data) = db.config.movies.get(i) {
+                        if let Some(thumb) = &movie_data.movie.thumb {
+                            if thumb.starts_with("http") {
+                                target_download_url = Some(thumb.clone());
+                            } else if thumb.ends_with(".com") || thumb.contains(".com/") {
+                                // println!("Suspicious thumb (URL-like): {}", thumb);
+                                if thumb.contains("/") {
+                                    target_download_url = Some(if thumb.starts_with("//") {
+                                        format!("https:{}", thumb)
+                                    } else {
+                                        format!("https://{}", thumb)
+                                    });
+                                } else {
                                     needs_rescrape = true;
                                 }
                             } else {
-                                // println!("No extension for thumb: {:?}", p);
-                                needs_rescrape = true;
+                                // Check local
+                                let p = PathBuf::from(thumb);
+                                if !p.exists() {
+                                    // println!("Missing local thumb: {:?}", p);
+                                    needs_rescrape = true;
+                                } else {
+                                    if let Some(ext) = p.extension() {
+                                        let ext_s = ext.to_string_lossy().to_lowercase();
+                                        if !["jpg", "jpeg", "png", "gif", "webp"].contains(&ext_s.as_str())
+                                        {
+                                            // println!("Invalid thumb extension: {:?}", p);
+                                            needs_rescrape = true;
+                                        }
+                                    } else {
+                                        // println!("No extension for thumb: {:?}", p);
+                                            needs_rescrape = true;
+                                    }
+                                }
                             }
+                        } else {
+                            // No thumb
                         }
                     }
-                } else {
-                    // No thumb
                 }
-            }
-        }
-
-        let display_id = movie_num.unwrap_or_else(|| "Unknown".to_string());
-
-        if list_need_fix {
-            if let Some(url) = target_download_url {
-                println!(
-                    "[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Download URL ({})",
-                    display_id, movie_title, url
-                );
-                found_issues_count += 1;
-                continue;
-            }
-            if needs_rescrape {
-                println!("[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Re-scrape (Invalid/Missing Thumb)", display_id, movie_title);
-                found_issues_count += 1;
-                continue;
-            }
-            // If neither, just continue loop
-            continue;
-        }
-
-        let nfo_path = db.config.movies[i].path.clone();
-        let parent = nfo_path.parent().unwrap();
-        let file_stem = nfo_path.file_stem().unwrap().to_string_lossy();
-        let target_img_path = parent.join(format!("{}-poster.jpg", file_stem));
-
-        // Attempt download if we have a URL and don't need full rescrape yet
+        
+                let display_id = movie_num.unwrap_or_else(|| "Unknown".to_string());
+        
+                if list_need_fix {
+                    if let Some(url) = target_download_url {
+                        println!(
+                            "[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Download URL ({})",
+                            display_id, movie_title, url
+                        );
+                        found_issues_count += 1;
+                        continue;
+                    }
+                    if needs_rescrape {
+                        println!("[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Re-scrape (Invalid/Missing Thumb)", display_id, movie_title);
+                        found_issues_count += 1;
+                        continue;
+                    }
+                    // If neither, just continue loop
+                    continue;
+                }
+        
+                let nfo_path = db.config.movies[i].abs_path();
+                let parent = nfo_path.parent().unwrap();
+                let file_stem = nfo_path.file_stem().unwrap().to_string_lossy();
+                let target_img_path = parent.join(format!("{}-poster.jpg", file_stem));
+                // Attempt download if we have a URL and don't need full rescrape yet
         if let Some(url) = target_download_url {
             if dry_run && !test_first {
                 println!("  [Dry Run] Would download thumb: {}", url);
@@ -339,7 +335,7 @@ async fn run_fix_db(
 
                         // Update DB points to CACHE for thumb
                         db.config.movies[i].movie.thumb =
-                            Some(cache_thumb_path.to_string_lossy().to_string());
+                            Some(thumb_filename.clone());
 
                         // Update poster to local NFO side file
                         db.config.movies[i].movie.poster =
@@ -422,7 +418,7 @@ async fn run_fix_db(
                                     println!("  Cached to: {:?}", cache_thumb_path);
                                     // Point thumb to cache
                                     new_movie.thumb =
-                                        Some(cache_thumb_path.to_string_lossy().to_string());
+                                        Some(thumb_filename.clone());
                                 }
 
                                 new_movie.poster =
@@ -478,7 +474,7 @@ async fn download_file(url: &str, path: &PathBuf) -> anyhow::Result<()> {
 
 fn update_nfo_file(movie_data: &kr::db::MovieData) {
     if let Ok(xml) = kl::generate_nfo_xml(&movie_data.movie) {
-        let _ = fs::write(&movie_data.path, xml);
+        let _ = fs::write(movie_data.abs_path(), xml);
     }
 }
 
@@ -539,10 +535,7 @@ async fn run_webdav_scraper(
 
     let javdb = kl::javdb::JavdbScraper::with_cookie(cookie.clone())?;
     let fc2 = kl::fc2::Fc2Scraper::new()?;
-    let cache_dir = dirs::DIR.cache_dir().join("thumbs");
-    if !cache_dir.exists() {
-        fs::create_dir_all(&cache_dir)?;
-    }
+    let cache_dir = &*dirs::THUMB_CACHE_DIR;
 
     // Initialize browser session if requested (default)
     let mut browser_session = None;
@@ -694,8 +687,8 @@ async fn recursive_scan_webdav(
                 Ok(mut movie) => {
                     println!("  Scraped: {}", movie.title);
 
-                    // Download images to local cache
-                    let global_thumb_path = cache_dir.join(format!("{}.jpg", num));
+                    let thumb_filename = format!("{}.jpg", num);
+                    let global_thumb_path = cache_dir.join(&thumb_filename);
                     if !global_thumb_path.exists() {
                         if let Some(poster_url) = &movie.poster {
                             if poster_url.starts_with("http") {
@@ -716,7 +709,7 @@ async fn recursive_scan_webdav(
                     }
 
                     if global_thumb_path.exists() {
-                        movie.thumb = Some(global_thumb_path.to_string_lossy().to_string());
+                        movie.thumb = Some(thumb_filename);
                     }
 
                     db.config.movies.push(kr::db::WebDavMovieData {
@@ -746,10 +739,7 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
         fs::create_dir_all(&output)?;
     }
 
-    let cache_dir = dirs::DIR.cache_dir().join("thumbs");
-    if !cache_dir.exists() {
-        fs::create_dir_all(&cache_dir)?;
-    }
+    let cache_dir = &*dirs::THUMB_CACHE_DIR;
 
     // Load database
     let mut db = kr::db::SimpleJsonDatabase::new()
@@ -859,7 +849,8 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                 }
 
                                 // 3. Download images
-                                let global_thumb_path = cache_dir.join(format!("{}.jpg", number));
+                                let thumb_filename = format!("{}.jpg", number);
+                                let global_thumb_path = cache_dir.join(&thumb_filename);
 
                                 if let Some(poster_url) = &movie.poster {
                                     // Download poster to movie dir
@@ -898,21 +889,22 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                     }
 
                                     if downloaded || global_thumb_path.exists() {
-                                        movie.thumb = Some(global_thumb_path.to_string_lossy().to_string());
+                                        movie.thumb = Some(thumb_filename);
                                         movie.poster = Some(img_path.to_string_lossy().to_string());
                                     }
                                 }
 
                                 // Add to database
                                 // Update or Add to database
+                                let relative_nfo_path = nfo_path.strip_prefix(&*dirs::SEARCH_PATH).unwrap_or(&nfo_path).to_owned();
                                 if let Some(idx) =
-                                    db.config.movies.iter().position(|m| m.path == nfo_path)
+                                    db.config.movies.iter().position(|m| m.path == relative_nfo_path)
                                 {
-                                    println!("  Updating existing DB entry for: {:?}", nfo_path);
+                                    println!("  Updating existing DB entry for: {:?}", relative_nfo_path);
                                     db.config.movies[idx].movie = movie;
                                 } else {
                                     let movie_data = kr::db::MovieData {
-                                        path: nfo_path,
+                                        path: relative_nfo_path,
                                         movie,
                                         added_time: std::time::SystemTime::now(),
                                         fav: false,

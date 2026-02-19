@@ -687,8 +687,9 @@ fn try_play_video(
         return false;
     };
 
-    let parent = data.path.parent().unwrap();
-    let filename = data.path.file_prefix().unwrap().to_str().unwrap();
+    let abs_path = data.abs_path();
+    let parent = abs_path.parent().unwrap();
+    let filename = abs_path.file_prefix().unwrap().to_str().unwrap();
     let markers = db_ref.get_markers(movie_index);
 
     for ext in [

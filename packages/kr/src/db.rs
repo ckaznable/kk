@@ -95,6 +95,17 @@ pub struct WebDavMovieData {
     pub markers: Vec<f64>,
 }
 
+impl WebDavMovieData {
+    pub fn abs_thumb_path(&self) -> Option<PathBuf> {
+        let thumb = self.movie.thumb.as_ref()?;
+        let p = PathBuf::from(thumb);
+        if p.is_absolute() {
+            return Some(p);
+        }
+        Some(dirs::THUMB_CACHE_DIR.join(&p))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct WebDavConfig {
     pub base_url: String,
@@ -254,7 +265,10 @@ impl SimpleJsonDatabase {
             return None;
         };
 
-        let path = path.strip_prefix(&*dirs::SEARCH_PATH).unwrap_or(path).to_owned();
+        let path = path
+            .strip_prefix(&*dirs::SEARCH_PATH)
+            .unwrap_or(path)
+            .to_owned();
 
         Some(MovieData {
             path,

@@ -82,7 +82,7 @@ impl TryFrom<IndexedMovieData<'_>> for RenderItem {
 impl From<(usize, &kr::db::WebDavMovieData)> for RenderItem {
     fn from(value: (usize, &kr::db::WebDavMovieData)) -> Self {
         let (index, data) = value;
-        let img_path = data.movie.thumb.as_ref().map(PathBuf::from).unwrap_or_default();
+        let img_path = data.abs_thumb_path().unwrap_or_default();
         Self {
             path: data.url_path.clone(),
             img_path,

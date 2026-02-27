@@ -760,8 +760,34 @@ fn query_menu_items(
     mode: &MenuMode,
 ) -> Vec<crate::ui::browse::RenderItem> {
     if matches!(mode, MenuMode::WebDav) {
+        // Build a normalized set of local movie nums to exclude already-owned titles
+        let local_nums: std::collections::HashSet<String> = db
+            .borrow()
+            .config
+            .movies
+            .iter()
+            .filter_map(|m| m.movie.num.as_ref())
+            .map(|n| n.to_uppercase().replace('-', "").replace('_', ""))
+            .collect();
+
         let wd = wd_db.borrow();
-        let mut items: Vec<_> = wd.config.movies.iter().enumerate().collect();
+        let mut items: Vec<_> = wd
+            .config
+            .movies
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                // Keep items whose num is absent or not found in local collection
+                m.movie
+                    .num
+                    .as_ref()
+                    .map(|n| {
+                        let normalized = n.to_uppercase().replace('-', "").replace('_', "");
+                        !local_nums.contains(&normalized)
+                    })
+                    .unwrap_or(true)
+            })
+            .collect();
         items.sort_by(|(_, a), (_, b)| b.added_time.cmp(&a.added_time));
         return items
             .into_iter()

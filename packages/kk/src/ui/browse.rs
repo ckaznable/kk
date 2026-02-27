@@ -56,6 +56,7 @@ pub struct RenderItem {
     pub path: String, // NFO path or WebDAV relative path
     pub img_path: PathBuf,
     pub title: String,
+    pub num: Option<String>, // Movie number / ID for fallback display
     pub index: u32,
     pub fav: bool,
     pub is_webdav: bool,
@@ -72,6 +73,7 @@ impl TryFrom<IndexedMovieData<'_>> for RenderItem {
             path: nfo_path.to_string_lossy().to_string(),
             img_path,
             title: value.movie.movie.title.clone(),
+            num: value.movie.movie.num.clone(),
             index: value.index,
             fav: value.movie.fav,
             is_webdav: false,
@@ -87,6 +89,7 @@ impl From<(usize, &kr::db::WebDavMovieData)> for RenderItem {
             path: data.url_path.clone(),
             img_path,
             title: data.movie.title.clone(),
+            num: data.movie.num.clone(),
             index: index as u32,
             fav: data.fav,
             is_webdav: true,
@@ -97,111 +100,168 @@ impl From<(usize, &kr::db::WebDavMovieData)> for RenderItem {
 pub struct MenuItem;
 
 impl MenuItem {
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(item: RenderItem, symbol: String) -> anyhow::Result<Group> {
-        let mut img = SharedImage::load(item.img_path)?;
-        img.scale(MENU_IMG_WIDTH, MENU_IMG_HEIGHT, true, true);
+    pub fn new(item: RenderItem, symbol: String) {
+        let img_result = SharedImage::load(&item.img_path);
 
-        let full_txt = item.title;
-        let mut draw_img = img.clone();
+        let full_txt = item.title.clone();
         let is_fav = item.fav;
+        // Fallback label: prefer movie num, otherwise use title
+        let fallback_label = item.num.clone().unwrap_or_else(|| item.title.clone());
 
-        let mut item = Group::default().with_size(MENU_ITEM_WIDTH, MENU_ITEM_HEIGHT);
-        item.set_frame(FrameType::NoBox);
-        item.draw(move |w| {
-            let img_y_fix = (MENU_IMG_HEIGHT - draw_img.height()) / 2;
-            let img_x = w.x() + (MENU_ITEM_WIDTH - MENU_IMG_WIDTH) / 2;
-            let img_y = w.y() + img_y_fix;
+        let mut g = Group::default().with_size(MENU_ITEM_WIDTH, MENU_ITEM_HEIGHT);
+        g.set_frame(FrameType::NoBox);
 
-            draw_img.draw(img_x, img_y, MENU_IMG_WIDTH, MENU_IMG_HEIGHT);
+        match img_result {
+            Ok(mut img) => {
+                img.scale(MENU_IMG_WIDTH, MENU_IMG_HEIGHT, true, true);
+                let mut draw_img = img.clone();
+                g.draw(move |w| {
+                    let img_y_fix = (MENU_IMG_HEIGHT - draw_img.height()) / 2;
+                    let img_x = w.x() + (MENU_ITEM_WIDTH - MENU_IMG_WIDTH) / 2;
+                    let img_y = w.y() + img_y_fix;
 
-            // Draw favorite heart icon only when favorited
-            if is_fav {
-                let heart_size = 20;
-                let heart_x = img_x + MENU_IMG_WIDTH - heart_size - 5;
-                let heart_y = img_y + 5;
+                    draw_img.draw(img_x, img_y, MENU_IMG_WIDTH, MENU_IMG_HEIGHT);
 
-                // Draw filled red heart for favorited items
-                draw::set_draw_color(Color::from_rgb(220, 53, 69)); // Red color
-                draw::set_font(Font::Helvetica, heart_size);
-                draw::draw_text2("♥", heart_x, heart_y, heart_size, heart_size, Align::Center);
-            }
-
-            draw::set_draw_color(Color::White);
-            draw::set_font(Font::Helvetica, 14);
-            let txt_y = img_y + MENU_IMG_HEIGHT + 5 - img_y_fix;
-            let max_w = (MENU_ITEM_WIDTH - 4) as f64;
-            let line_height = 18;
-
-            let mut line1 = String::new();
-            let mut line2 = String::new();
-            let mut remaining_text = full_txt.as_str();
-
-            for (i, c) in full_txt.char_indices() {
-                let end_idx = i + c.len_utf8();
-
-                let current_slice = &full_txt[0..end_idx];
-
-                if draw::width(current_slice) > max_w {
-                    line1 = full_txt[0..i].to_string();
-                    remaining_text = &full_txt[i..];
-                    break;
-                }
-
-                if end_idx == full_txt.len() {
-                    line1 = full_txt.clone();
-                    remaining_text = "";
-                }
-            }
-
-            if !remaining_text.is_empty() {
-                if draw::width(remaining_text) > max_w {
-                    let mut temp_line2 = remaining_text.to_string();
-                    while !temp_line2.is_empty()
-                        && draw::width(&format!("{}...", temp_line2)) > max_w
-                    {
-                        temp_line2.pop();
+                    // Draw favorite heart icon only when favorited
+                    if is_fav {
+                        let heart_size = 20;
+                        let heart_x = img_x + MENU_IMG_WIDTH - heart_size - 5;
+                        let heart_y = img_y + 5;
+                        draw::set_draw_color(Color::from_rgb(220, 53, 69));
+                        draw::set_font(Font::Helvetica, heart_size);
+                        draw::draw_text2(
+                            "♥",
+                            heart_x,
+                            heart_y,
+                            heart_size,
+                            heart_size,
+                            Align::Center,
+                        );
                     }
-                    line2 = format!("{}...", temp_line2);
-                } else {
-                    line2 = remaining_text.to_string();
+
+                    draw::set_draw_color(Color::White);
+                    draw::set_font(Font::Helvetica, 14);
+                    let txt_y = img_y + MENU_IMG_HEIGHT + 5 - img_y_fix;
+                    Self::draw_title_lines(&full_txt, w.x(), txt_y, MENU_ITEM_WIDTH);
+
+                    let line_height = 18;
+                    draw::draw_text2(
+                        &format!("({symbol})"),
+                        w.x(),
+                        txt_y + line_height * 2,
+                        MENU_ITEM_WIDTH,
+                        line_height,
+                        Align::Center,
+                    );
+                });
+            }
+            Err(_) => {
+                // Fallback: render a dark placeholder with the movie num as large text
+                g.draw(move |w| {
+                    let img_x = w.x() + (MENU_ITEM_WIDTH - MENU_IMG_WIDTH) / 2;
+                    let img_y = w.y();
+
+                    // Dark gray background for the image area
+                    draw::draw_rect_fill(
+                        img_x,
+                        img_y,
+                        MENU_IMG_WIDTH,
+                        MENU_IMG_HEIGHT,
+                        Color::from_rgb(40, 40, 40),
+                    );
+
+                    // Draw movie num / title as large centered text
+                    let label_font_size = 22;
+                    draw::set_draw_color(Color::from_rgb(200, 200, 200));
+                    draw::set_font(Font::HelveticaBold, label_font_size);
+                    draw::draw_text2(
+                        &fallback_label,
+                        img_x,
+                        img_y,
+                        MENU_IMG_WIDTH,
+                        MENU_IMG_HEIGHT,
+                        Align::Center,
+                    );
+
+                    // Draw favorite heart if needed
+                    if is_fav {
+                        let heart_size = 20;
+                        let heart_x = img_x + MENU_IMG_WIDTH - heart_size - 5;
+                        let heart_y = img_y + 5;
+                        draw::set_draw_color(Color::from_rgb(220, 53, 69));
+                        draw::set_font(Font::Helvetica, heart_size);
+                        draw::draw_text2(
+                            "♥",
+                            heart_x,
+                            heart_y,
+                            heart_size,
+                            heart_size,
+                            Align::Center,
+                        );
+                    }
+
+                    draw::set_draw_color(Color::White);
+                    draw::set_font(Font::Helvetica, 14);
+                    let txt_y = img_y + MENU_IMG_HEIGHT + 5;
+                    Self::draw_title_lines(&full_txt, w.x(), txt_y, MENU_ITEM_WIDTH);
+
+                    let line_height = 18;
+                    draw::draw_text2(
+                        &format!("({symbol})"),
+                        w.x(),
+                        txt_y + line_height * 2,
+                        MENU_ITEM_WIDTH,
+                        line_height,
+                        Align::Center,
+                    );
+                });
+            }
+        }
+
+        g.end();
+    }
+
+    /// Render up to two lines of title text, truncating with "..." if needed.
+    fn draw_title_lines(full_txt: &str, x: i32, y: i32, width: i32) {
+        let max_w = (width - 4) as f64;
+        let line_height = 18;
+
+        let mut line1 = String::new();
+        let mut line2 = String::new();
+        let mut remaining_text = full_txt;
+
+        for (i, c) in full_txt.char_indices() {
+            let end_idx = i + c.len_utf8();
+            let current_slice = &full_txt[0..end_idx];
+            if draw::width(current_slice) > max_w {
+                line1 = full_txt[0..i].to_string();
+                remaining_text = &full_txt[i..];
+                break;
+            }
+            if end_idx == full_txt.len() {
+                line1 = full_txt.to_string();
+                remaining_text = "";
+            }
+        }
+
+        if !remaining_text.is_empty() {
+            if draw::width(remaining_text) > max_w {
+                let mut temp = remaining_text.to_string();
+                while !temp.is_empty() && draw::width(&format!("{}...", temp)) > max_w {
+                    temp.pop();
                 }
+                line2 = format!("{}...", temp);
+            } else {
+                line2 = remaining_text.to_string();
             }
+        }
 
-            if !line1.is_empty() {
-                draw::draw_text2(
-                    &line1,
-                    w.x(),
-                    txt_y,
-                    MENU_ITEM_WIDTH,
-                    line_height,
-                    Align::Left,
-                );
-            }
-
-            if !line2.is_empty() {
-                draw::draw_text2(
-                    &line2,
-                    w.x(),
-                    txt_y + line_height,
-                    MENU_ITEM_WIDTH,
-                    line_height,
-                    Align::Left,
-                );
-            }
-
-            draw::draw_text2(
-                &format!("({symbol})"),
-                w.x(),
-                txt_y + line_height * 2,
-                MENU_ITEM_WIDTH,
-                line_height,
-                Align::Center,
-            );
-        });
-        item.end();
-
-        Ok(item)
+        if !line1.is_empty() {
+            draw::draw_text2(&line1, x, y, width, line_height, Align::Left);
+        }
+        if !line2.is_empty() {
+            draw::draw_text2(&line2, x, y + line_height, width, line_height, Align::Left);
+        }
     }
 }
 
@@ -324,10 +384,7 @@ impl BrowseMenu {
                 Some((item, symbol.clone()))
             })
             .map(|(item, s)| {
-                if MenuItem::new(item.clone(), s).is_err() {
-                    println!("{:?} render failed", item.path);
-                };
-
+                MenuItem::new(item.clone(), s);
                 item.index
             })
             .collect();

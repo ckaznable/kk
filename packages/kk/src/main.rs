@@ -267,13 +267,28 @@ fn main() {
 
                                                 if is_webdav {
 
-                                                    let new_fav_status = wd_db.borrow_mut().toggle_fav(item_index as usize);
+                                                    let is_fav = wd_db.borrow().get_movie(item_index as usize).map(|m| m.fav).unwrap_or(false);
 
-                                                    wd_db.borrow().flush();
+                                                    let wd_context_items = if is_fav {
+                                                        menu::MenuItem::new(&["Unfavorite", "Copy Path"])
+                                                    } else {
+                                                        menu::MenuItem::new(&["Favorite", "Copy Path"])
+                                                    };
 
-                                                    redraw_menu_keep_page(menu.clone(), db.clone(), wd_db.clone(), menu.current_mode());
+                                                    if let Some(val) = wd_context_items.popup(x, y) {
+                                                        let label = val.label().unwrap_or_default();
 
-                                                    println!("WebDAV Item {} favorite status toggled: {}", item_index, new_fav_status);
+                                                        if label == "Favorite" || label == "Unfavorite" {
+                                                            let new_fav_status = wd_db.borrow_mut().toggle_fav(item_index as usize);
+                                                            wd_db.borrow().flush();
+                                                            redraw_menu_keep_page(menu.clone(), db.clone(), wd_db.clone(), menu.current_mode());
+                                                            println!("WebDAV Item {} favorite status toggled: {}", item_index, new_fav_status);
+                                                        } else if label == "Copy Path" {
+                                                            let url_path = wd_db.borrow().get_movie(item_index as usize).map(|m| m.url_path.clone()).unwrap_or_default();
+                                                            app::copy(&url_path);
+                                                            println!("Copied WebDAV path to clipboard: {}", url_path);
+                                                        }
+                                                    }
 
                                                 } else {
 

@@ -110,17 +110,33 @@ async fn main() -> anyhow::Result<()> {
             let output_path = output.unwrap_or_else(|| dirs::SEARCH_PATH.to_path_buf());
             run_scraper(input, output_path).await?;
         }
-        Commands::Webdav { url, user, pass, path, list_only, cookie, headless } => {
+        Commands::Webdav {
+            url,
+            user,
+            pass,
+            path,
+            list_only,
+            cookie,
+            headless,
+        } => {
             run_webdav_scraper(url, user, pass, path, list_only, cookie, headless).await?;
         }
-        Commands::TestScrape { id, cookie, headless } => {
+        Commands::TestScrape {
+            id,
+            cookie,
+            headless,
+        } => {
             run_test_scrape(&id, cookie, headless).await?;
         }
     }
     Ok(())
 }
 
-fn run_test_scrape(id: &str, cookie: Option<String>, headless: bool) -> impl std::future::Future<Output = anyhow::Result<()>> {
+fn run_test_scrape(
+    id: &str,
+    cookie: Option<String>,
+    headless: bool,
+) -> impl std::future::Future<Output = anyhow::Result<()>> {
     let id = id.to_string();
     async move {
         println!("Testing scrape for ID: {}", id);
@@ -129,9 +145,11 @@ fn run_test_scrape(id: &str, cookie: Option<String>, headless: bool) -> impl std
             let scraper = kl::browser::BrowserScraper::new().await?;
             let is_fc2 = id.to_uppercase().starts_with("FC2");
             if is_fc2 {
-                return Err(anyhow::anyhow!("Browser scraping not yet implemented for FC2"));
+                return Err(anyhow::anyhow!(
+                    "Browser scraping not yet implemented for FC2"
+                ));
             }
-            
+
             scraper.scrape_with_interaction(&id, true).await?
         } else {
             let cookie = cookie.or_else(|| dirs::JAVDB_COOKIE.clone());
@@ -149,7 +167,10 @@ fn run_test_scrape(id: &str, cookie: Option<String>, headless: bool) -> impl std
         println!("--- Scrape Result ---");
         println!("Title:      {}", movie.title);
         println!("Number:     {}", movie.num.as_deref().unwrap_or("-"));
-        println!("Release:    {}", movie.releasedate.as_deref().unwrap_or("-"));
+        println!(
+            "Release:    {}",
+            movie.releasedate.as_deref().unwrap_or("-")
+        );
         println!("Label:      {}", movie.label.as_deref().unwrap_or("-"));
         println!(
             "Actors:     {}",
@@ -162,7 +183,11 @@ fn run_test_scrape(id: &str, cookie: Option<String>, headless: bool) -> impl std
         );
         println!(
             "Genres:     {}",
-            movie.genre.as_ref().map(|g| g.join(", ")).unwrap_or_default()
+            movie
+                .genre
+                .as_ref()
+                .map(|g| g.join(", "))
+                .unwrap_or_default()
         );
         println!(
             "Tags:       {}",
@@ -212,100 +237,100 @@ async fn run_fix_db(
     );
     println!("Loaded {} movies from database.", len);
 
-        let cache_dir = &*dirs::THUMB_CACHE_DIR;
-        // println!("Cache thumbs dir: {:?}", cache_dir); // Valid but reduces noise for list mode?
-    
-        for i in 0..len {
-            let mut needs_rescrape = false;
-            // Analyze current state
-            let mut target_download_url: Option<String> = None;
-    
-            // Information for reporting
-            let movie_title = db.config.movies[i].movie.title.clone();
-            let movie_num_opt = db.config.movies[i].movie.num.clone();
-    
-            // Extract ID for cache filename
-            let file_stem_for_id;
-            {
-                // We need to extract file stem early because borrow checker
-                let p = db.config.movies[i].abs_path();
-                file_stem_for_id = p.file_stem().unwrap().to_string_lossy().to_string();
-            }
-    
-            // Try getting ID from movie.num, fallback to file_stem
-            let movie_num = movie_num_opt.clone();
-            let cache_id = movie_num
-                .clone()
-                .unwrap_or_else(|| file_stem_for_id.clone());
-            let thumb_filename = format!("{}.jpg", cache_id); // Using .jpg by convention
-            let cache_thumb_path = cache_dir.join(&thumb_filename);
-                    {
-                    if let Some(movie_data) = db.config.movies.get(i) {
-                        if let Some(thumb) = &movie_data.movie.thumb {
-                            if thumb.starts_with("http") {
-                                target_download_url = Some(thumb.clone());
-                            } else if thumb.ends_with(".com") || thumb.contains(".com/") {
-                                // println!("Suspicious thumb (URL-like): {}", thumb);
-                                if thumb.contains("/") {
-                                    target_download_url = Some(if thumb.starts_with("//") {
-                                        format!("https:{}", thumb)
-                                    } else {
-                                        format!("https://{}", thumb)
-                                    });
-                                } else {
+    let cache_dir = &*dirs::THUMB_CACHE_DIR;
+    // println!("Cache thumbs dir: {:?}", cache_dir); // Valid but reduces noise for list mode?
+
+    for i in 0..len {
+        let mut needs_rescrape = false;
+        // Analyze current state
+        let mut target_download_url: Option<String> = None;
+
+        // Information for reporting
+        let movie_title = db.config.movies[i].movie.title.clone();
+        let movie_num_opt = db.config.movies[i].movie.num.clone();
+
+        // Extract ID for cache filename
+        let file_stem_for_id;
+        {
+            // We need to extract file stem early because borrow checker
+            let p = db.config.movies[i].abs_path();
+            file_stem_for_id = p.file_stem().unwrap().to_string_lossy().to_string();
+        }
+
+        // Try getting ID from movie.num, fallback to file_stem
+        let movie_num = movie_num_opt.clone();
+        let cache_id = movie_num
+            .clone()
+            .unwrap_or_else(|| file_stem_for_id.clone());
+        let thumb_filename = format!("{}.jpg", cache_id); // Using .jpg by convention
+        let cache_thumb_path = cache_dir.join(&thumb_filename);
+        {
+            if let Some(movie_data) = db.config.movies.get(i) {
+                if let Some(thumb) = &movie_data.movie.thumb {
+                    if thumb.starts_with("http") {
+                        target_download_url = Some(thumb.clone());
+                    } else if thumb.ends_with(".com") || thumb.contains(".com/") {
+                        // println!("Suspicious thumb (URL-like): {}", thumb);
+                        if thumb.contains("/") {
+                            target_download_url = Some(if thumb.starts_with("//") {
+                                format!("https:{}", thumb)
+                            } else {
+                                format!("https://{}", thumb)
+                            });
+                        } else {
+                            needs_rescrape = true;
+                        }
+                    } else {
+                        // Check local
+                        let p = PathBuf::from(thumb);
+                        if !p.exists() {
+                            // println!("Missing local thumb: {:?}", p);
+                            needs_rescrape = true;
+                        } else {
+                            if let Some(ext) = p.extension() {
+                                let ext_s = ext.to_string_lossy().to_lowercase();
+                                if !["jpg", "jpeg", "png", "gif", "webp"].contains(&ext_s.as_str())
+                                {
+                                    // println!("Invalid thumb extension: {:?}", p);
                                     needs_rescrape = true;
                                 }
                             } else {
-                                // Check local
-                                let p = PathBuf::from(thumb);
-                                if !p.exists() {
-                                    // println!("Missing local thumb: {:?}", p);
-                                    needs_rescrape = true;
-                                } else {
-                                    if let Some(ext) = p.extension() {
-                                        let ext_s = ext.to_string_lossy().to_lowercase();
-                                        if !["jpg", "jpeg", "png", "gif", "webp"].contains(&ext_s.as_str())
-                                        {
-                                            // println!("Invalid thumb extension: {:?}", p);
-                                            needs_rescrape = true;
-                                        }
-                                    } else {
-                                        // println!("No extension for thumb: {:?}", p);
-                                            needs_rescrape = true;
-                                    }
-                                }
+                                // println!("No extension for thumb: {:?}", p);
+                                needs_rescrape = true;
                             }
-                        } else {
-                            // No thumb
                         }
                     }
+                } else {
+                    // No thumb
                 }
-        
-                let display_id = movie_num.unwrap_or_else(|| "Unknown".to_string());
-        
-                if list_need_fix {
-                    if let Some(url) = target_download_url {
-                        println!(
-                            "[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Download URL ({})",
-                            display_id, movie_title, url
-                        );
-                        found_issues_count += 1;
-                        continue;
-                    }
-                    if needs_rescrape {
-                        println!("[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Re-scrape (Invalid/Missing Thumb)", display_id, movie_title);
-                        found_issues_count += 1;
-                        continue;
-                    }
-                    // If neither, just continue loop
-                    continue;
-                }
-        
-                let nfo_path = db.config.movies[i].abs_path();
-                let parent = nfo_path.parent().unwrap();
-                let file_stem = nfo_path.file_stem().unwrap().to_string_lossy();
-                let target_img_path = parent.join(format!("{}-poster.jpg", file_stem));
-                // Attempt download if we have a URL and don't need full rescrape yet
+            }
+        }
+
+        let display_id = movie_num.unwrap_or_else(|| "Unknown".to_string());
+
+        if list_need_fix {
+            if let Some(url) = target_download_url {
+                println!(
+                    "[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Download URL ({})",
+                    display_id, movie_title, url
+                );
+                found_issues_count += 1;
+                continue;
+            }
+            if needs_rescrape {
+                println!("[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Re-scrape (Invalid/Missing Thumb)", display_id, movie_title);
+                found_issues_count += 1;
+                continue;
+            }
+            // If neither, just continue loop
+            continue;
+        }
+
+        let nfo_path = db.config.movies[i].abs_path();
+        let parent = nfo_path.parent().unwrap();
+        let file_stem = nfo_path.file_stem().unwrap().to_string_lossy();
+        let target_img_path = parent.join(format!("{}-poster.jpg", file_stem));
+        // Attempt download if we have a URL and don't need full rescrape yet
         if let Some(url) = target_download_url {
             if dry_run && !test_first {
                 println!("  [Dry Run] Would download thumb: {}", url);
@@ -334,8 +359,7 @@ async fn run_fix_db(
                         }
 
                         // Update DB points to CACHE for thumb
-                        db.config.movies[i].movie.thumb =
-                            Some(thumb_filename.clone());
+                        db.config.movies[i].movie.thumb = Some(thumb_filename.clone());
 
                         // Update poster to local NFO side file
                         db.config.movies[i].movie.poster =
@@ -382,7 +406,11 @@ async fn run_fix_db(
                 println!("  Re-scraping ID: {}", id);
 
                 let scrape_result = if let Some(session) = &browser_session {
-                    browser_scraper.as_ref().unwrap().scrape_session(session, &id, !id.to_uppercase().starts_with("FC2")).await
+                    browser_scraper
+                        .as_ref()
+                        .unwrap()
+                        .scrape_session(session, &id, !id.to_uppercase().starts_with("FC2"))
+                        .await
                 } else {
                     let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
                         &fc2
@@ -417,8 +445,7 @@ async fn run_fix_db(
                                 } else {
                                     println!("  Cached to: {:?}", cache_thumb_path);
                                     // Point thumb to cache
-                                    new_movie.thumb =
-                                        Some(thumb_filename.clone());
+                                    new_movie.thumb = Some(thumb_filename.clone());
                                 }
 
                                 new_movie.poster =
@@ -528,8 +555,24 @@ async fn run_webdav_scraper(
     let cookie = cookie.or_else(|| dirs::JAVDB_COOKIE.clone());
 
     if list_only {
-        println!("Dry run mode: Listing files to be scraped from {}", remote_path);
-        recursive_scan_webdav(&client, &remote_path, &mut db, local_db.as_ref(), None, None, &PathBuf::new(), 0, true, cookie, None).await?;
+        println!(
+            "Dry run mode: Listing files to be scraped from {}",
+            remote_path
+        );
+        recursive_scan_webdav(
+            &client,
+            &remote_path,
+            &mut db,
+            local_db.as_ref(),
+            None,
+            None,
+            &PathBuf::new(),
+            0,
+            true,
+            cookie,
+            None,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -549,18 +592,19 @@ async fn run_webdav_scraper(
 
     // Use a queue for breadth-first search or just recursion. Let's use a recursive helper.
     recursive_scan_webdav(
-        &client, 
-        &remote_path, 
-        &mut db, 
+        &client,
+        &remote_path,
+        &mut db,
         local_db.as_ref(),
-        Some(&javdb), 
-        Some(&fc2), 
-        &cache_dir, 
-        0, 
-        false, 
+        Some(&javdb),
+        Some(&fc2),
+        &cache_dir,
+        0,
+        false,
         cookie,
-        browser_scraper.as_ref().zip(browser_session.as_ref())
-    ).await?;
+        browser_scraper.as_ref().zip(browser_session.as_ref()),
+    )
+    .await?;
 
     if let Some(session) = browser_session {
         session.browser.close().await?;
@@ -601,12 +645,26 @@ async fn recursive_scan_webdav(
 
     for res in resources {
         // WebDAV list often includes the directory itself in the response
-        if res.path == path || res.path == format!("{}/", path) || format!("{}/", res.path) == path {
+        if res.path == path || res.path == format!("{}/", path) || format!("{}/", res.path) == path
+        {
             continue;
         }
 
         if res.is_dir {
-            recursive_scan_webdav(client, &res.path, db, local_db, javdb, fc2, cache_dir, depth + 1, list_only, cookie.clone(), browser).await?;
+            recursive_scan_webdav(
+                client,
+                &res.path,
+                db,
+                local_db,
+                javdb,
+                fc2,
+                cache_dir,
+                depth + 1,
+                list_only,
+                cookie.clone(),
+                browser,
+            )
+            .await?;
             continue;
         }
 
@@ -672,7 +730,9 @@ async fn recursive_scan_webdav(
                 Ok(m)
             } else if let Some((scraper, session)) = browser {
                 did_scrape = true;
-                scraper.scrape_session(session, &num, !num.to_uppercase().starts_with("FC2")).await
+                scraper
+                    .scrape_session(session, &num, !num.to_uppercase().starts_with("FC2"))
+                    .await
             } else {
                 did_scrape = true;
                 let scraper: &dyn Scraper = if num.to_uppercase().starts_with("FC2") {
@@ -719,7 +779,7 @@ async fn recursive_scan_webdav(
                         fav: false,
                         markers: Vec::new(),
                     });
-                    
+
                     // Flush after each successful scrape to avoid losing progress
                     db.flush();
                 }
@@ -778,12 +838,13 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                             Ok(m)
                         } else {
                             did_scrape = true;
-                            let scraper: &dyn Scraper =
-                                if number.to_uppercase().starts_with("FC2") || filename_starts_fc2 {
-                                    &fc2
-                                } else {
-                                    &javdb
-                                };
+                            let scraper: &dyn Scraper = if number.to_uppercase().starts_with("FC2")
+                                || filename_starts_fc2
+                            {
+                                &fc2
+                            } else {
+                                &javdb
+                            };
                             scraper.scrape(&number).await
                         };
 
@@ -808,33 +869,9 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                 let ext = path.extension().unwrap_or_default().to_string_lossy();
                                 let video_filename = format!("{}.{}", number, ext);
                                 let video_dest = movie_dir.join(video_filename);
-                                match fs::rename(path, &video_dest) {
+                                match move_file(path, &video_dest) {
                                     Ok(_) => println!("  Moved video to: {:?}", video_dest),
-                                    Err(e) => {
-                                        // Handle cross-device link error (Windows: 17, Unix: 18 usually)
-                                        // or other errors that might prevent atomic rename but allow copy
-                                        let raw_os_err = e.raw_os_error();
-                                        if raw_os_err == Some(17) || raw_os_err == Some(18) {
-                                            println!("  Cross-device link ({:?}), falling back to copy...", raw_os_err);
-                                            match fs::copy(path, &video_dest) {
-                                                Ok(_) => {
-                                                    if let Err(del_e) = fs::remove_file(path) {
-                                                        eprintln!("  Failed to delete source after copy: {}", del_e);
-                                                    } else {
-                                                        println!(
-                                                            "  Moved video to: {:?} (via copy)",
-                                                            video_dest
-                                                        );
-                                                    }
-                                                }
-                                                Err(copy_e) => {
-                                                    eprintln!("  Failed to copy video: {}", copy_e)
-                                                }
-                                            }
-                                        } else {
-                                            eprintln!("  Failed to move video: {}", e);
-                                        }
-                                    }
+                                    Err(e) => eprintln!("  Failed to move video: {}", e),
                                 }
 
                                 // 2. Save NFO
@@ -868,23 +905,33 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                         match reqwest::get(poster_url).await {
                                             Ok(response) => {
                                                 if let Ok(bytes) = response.bytes().await {
-                                                    if let Ok(mut file) = fs::File::create(&img_path) {
+                                                    if let Ok(mut file) =
+                                                        fs::File::create(&img_path)
+                                                    {
                                                         file.write_all(&bytes).ok();
                                                         println!("  Saved Poster: {:?}", img_path);
                                                         downloaded = true;
 
                                                         // Copy to global cache if not there
                                                         if !global_thumb_path.exists() {
-                                                            if let Err(e) = fs::write(&global_thumb_path, &bytes) {
+                                                            if let Err(e) = fs::write(
+                                                                &global_thumb_path,
+                                                                &bytes,
+                                                            ) {
                                                                 eprintln!("  Failed to write to cache: {}", e);
                                                             } else {
-                                                                println!("  Cached thumb: {:?}", global_thumb_path);
+                                                                println!(
+                                                                    "  Cached thumb: {:?}",
+                                                                    global_thumb_path
+                                                                );
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
-                                            Err(e) => eprintln!("  Failed to download poster: {}", e),
+                                            Err(e) => {
+                                                eprintln!("  Failed to download poster: {}", e)
+                                            }
                                         }
                                     }
 
@@ -896,11 +943,20 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
 
                                 // Add to database
                                 // Update or Add to database
-                                let relative_nfo_path = nfo_path.strip_prefix(&*dirs::SEARCH_PATH).unwrap_or(&nfo_path).to_owned();
-                                if let Some(idx) =
-                                    db.config.movies.iter().position(|m| m.path == relative_nfo_path)
+                                let relative_nfo_path = nfo_path
+                                    .strip_prefix(&*dirs::SEARCH_PATH)
+                                    .unwrap_or(&nfo_path)
+                                    .to_owned();
+                                if let Some(idx) = db
+                                    .config
+                                    .movies
+                                    .iter()
+                                    .position(|m| m.path == relative_nfo_path)
                                 {
-                                    println!("  Updating existing DB entry for: {:?}", relative_nfo_path);
+                                    println!(
+                                        "  Updating existing DB entry for: {:?}",
+                                        relative_nfo_path
+                                    );
                                     db.config.movies[idx].movie = movie;
                                 } else {
                                     let movie_data = kr::db::MovieData {
@@ -934,4 +990,23 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
     println!("Database flushed.");
 
     Ok(())
+}
+
+/// Move a file from `src` to `dst`, falling back to copy+delete when a
+/// cross-device rename is not possible (e.g. src and dst are on different
+/// filesystems / mount points).
+fn move_file(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices
+            || e.raw_os_error() == Some(18) // EXDEV on Linux
+            || e.raw_os_error() == Some(17) // EXDEV on some other Unix/Windows
+        => {
+            // Atomic rename is not possible across devices; fall back to copy + delete.
+            fs::copy(src, dst)?;
+            fs::remove_file(src)?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }

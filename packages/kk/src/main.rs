@@ -212,6 +212,23 @@ fn main() {
     }));
 
     let in_video = Rc::new(Cell::new(false));
+
+    // On Windows, GlWindow is a real HWND and captures MouseWheel events before
+    // they can bubble up to the parent window handler. We add a handler here so
+    // scroll-to-seek works regardless of which window has focus in video mode.
+    video_layer.handle(enclose!((mpv_tx, in_video) move |_w, ev| {
+        if ev == Event::MouseWheel && in_video.get() {
+            use fltk::app::MouseWheel;
+            match app::event_dy() {
+                MouseWheel::Up => { mpv_tx.send(MpvEvent::SeekRelative(-5)).ok(); }
+                MouseWheel::Down => { mpv_tx.send(MpvEvent::SeekRelative(5)).ok(); }
+                _ => {}
+            }
+            return true;
+        }
+        false
+    }));
+
     let mut mouse_event_throttle = 0u8;
     win.handle(enclose!((app_tx, mpv_tx, in_video, mut menu, db, wd_db) move |win, ev| {
         match ev {

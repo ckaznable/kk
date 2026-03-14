@@ -90,6 +90,13 @@ enum Commands {
         #[arg(long)]
         headless: bool,
     },
+
+    /// Start the cache HTTP server that accepts pre-fetched HTML and stores parsed metadata
+    Serve {
+        /// Port to listen on (default: 6969)
+        #[arg(short, long, default_value = "6969")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -127,6 +134,9 @@ async fn main() -> anyhow::Result<()> {
             headless,
         } => {
             run_test_scrape(&id, cookie, headless).await?;
+        }
+        Commands::Serve { port } => {
+            kl::server::run_server(port).await?;
         }
     }
     Ok(())
@@ -718,10 +728,23 @@ async fn recursive_scan_webdav(
             println!("  Found ID: {}", num);
 
             let mut existing_movie = None;
-            if let Some(local) = local_db {
-                if let Some(m) = local.find_movie_by_id(&num) {
-                    println!("  Found in local database, reusing metadata.");
+
+            // 1. Check kk_cache first
+            {
+                let cache = kl::server::KkCache::load();
+                if let Some(m) = cache.find(&num) {
+                    println!("  Found in kk_cache, reusing metadata.");
                     existing_movie = Some(m.clone());
+                }
+            }
+
+            // 2. Fall back to local DB
+            if existing_movie.is_none() {
+                if let Some(local) = local_db {
+                    if let Some(m) = local.find_movie_by_id(&num) {
+                        println!("  Found in local database, reusing metadata.");
+                        existing_movie = Some(m.clone());
+                    }
                 }
             }
 
@@ -821,10 +844,23 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                         println!("  Found ID: {}", number);
 
                         let mut existing_movie = None;
-                        if let Some(dav) = &dav_db {
-                            if let Some(m) = dav.find_movie_by_id(&number) {
-                                println!("  Found in WebDAV database, reusing metadata.");
+
+                        // 1. Check kk_cache first
+                        {
+                            let cache = kl::server::KkCache::load();
+                            if let Some(m) = cache.find(&number) {
+                                println!("  Found in kk_cache, reusing metadata.");
                                 existing_movie = Some(m.clone());
+                            }
+                        }
+
+                        // 2. Fall back to WebDAV DB
+                        if existing_movie.is_none() {
+                            if let Some(dav) = &dav_db {
+                                if let Some(m) = dav.find_movie_by_id(&number) {
+                                    println!("  Found in WebDAV database, reusing metadata.");
+                                    existing_movie = Some(m.clone());
+                                }
                             }
                         }
 

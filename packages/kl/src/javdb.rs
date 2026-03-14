@@ -22,10 +22,17 @@ impl JavdbScraper {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36".parse()?,
         );
         // ... (other headers)
-        headers.insert("Accept-Language", "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7".parse()?);
+        headers.insert(
+            "Accept-Language",
+            "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7".parse()?,
+        );
         headers.insert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7".parse()?);
         headers.insert("Cache-Control", "max-age=0".parse()?);
-        headers.insert("Sec-Ch-Ua", "\"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"144\", \"Chromium\";v=\"144\"".parse()?);
+        headers.insert(
+            "Sec-Ch-Ua",
+            "\"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"144\", \"Chromium\";v=\"144\""
+                .parse()?,
+        );
         headers.insert("Sec-Ch-Ua-Mobile", "?0".parse()?);
         headers.insert("Sec-Ch-Ua-Platform", "\"Windows\"".parse()?);
 
@@ -52,7 +59,7 @@ impl JavdbScraper {
         let search_url = format!("https://{}.com/search?q={}&f=all", self.site, number);
 
         let mut request = self.client.get(&search_url);
-        
+
         let mut cookie_str = "over18=1; theme=auto; locale=zh".to_string();
         if let Some(ref c) = self.cookie {
             cookie_str = format!("{}; {}", cookie_str, c);
@@ -63,14 +70,17 @@ impl JavdbScraper {
 
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             eprintln!("Error: 403 Forbidden when searching JavDB. This usually means Cloudflare protection is active.");
-            return Err(anyhow!("JavDB access forbidden (403). Cloudflare challenge active."));
+            return Err(anyhow!(
+                "JavDB access forbidden (403). Cloudflare challenge active."
+            ));
         }
 
         let html = response.text().await?;
         let document = Html::parse_document(&html);
 
         // Broadest possible selectors
-        let item_selector = Selector::parse(".movie-list > div, .item, .column, .box, .grid-item").unwrap();
+        let item_selector =
+            Selector::parse(".movie-list > div, .item, .column, .box, .grid-item").unwrap();
         let url_selector = Selector::parse("a").unwrap();
 
         let mut results = Vec::new();
@@ -99,13 +109,10 @@ impl JavdbScraper {
         }
 
         // Find matching URL
-        let correct_url = if let Some((url, _)) = results
-            .iter()
-            .find(|(_, t)| {
-                let t_clean = t.replace("-", "").replace("_", "");
-                t_clean.contains(&clean_number) || clean_number.contains(&t_clean)
-            })
-        {
+        let correct_url = if let Some((url, _)) = results.iter().find(|(_, t)| {
+            let t_clean = t.replace("-", "").replace("_", "");
+            t_clean.contains(&clean_number) || clean_number.contains(&t_clean)
+        }) {
             url
         } else if !results.is_empty() {
             // Last resort: if the results list is small, or the search was specific, pick the first one
@@ -121,7 +128,7 @@ impl JavdbScraper {
         let detail_url = self.search_movie(number).await?;
 
         let mut request = self.client.get(&detail_url);
-        
+
         let mut cookie_str = "over18=1; theme=auto; locale=zh".to_string();
         if let Some(ref c) = self.cookie {
             cookie_str = format!("{}; {}", cookie_str, c);
@@ -172,6 +179,46 @@ impl JavdbScraper {
             releasedate,
             cover,
             website: Some(detail_url),
+        })
+    }
+
+    /// Parse movie metadata from pre-fetched HTML string (used by cache server).
+    /// `number` is used as fallback for title/num extraction.
+    pub fn parse_html(&self, number: &str, html: &str) -> Result<Movie> {
+        // Check if authentication is required
+        if html.contains("此內容需要登入才能查看或操作")
+            || html.contains("需要VIP權限才能訪問此內容")
+        {
+            return Err(anyhow!("Authentication required for: {}", number));
+        }
+
+        let document = Html::parse_document(html);
+
+        let title = self.extract_title(&document, number)?;
+        let outline = self.extract_outline(&document);
+        let poster = self.extract_cover(&document);
+        let cover = poster.clone();
+        let actors = self.extract_actors(&document);
+        let tags = self.extract_tags(&document);
+        let genres = self.extract_genres(&document);
+        let num = self.extract_number(&document, number)?;
+        let releasedate = self.extract_release_date(&document);
+        let label = self.extract_label(&document);
+
+        Ok(Movie {
+            title,
+            outline,
+            poster: poster.clone(),
+            thumb: poster.clone(),
+            fanart: poster.clone(),
+            label,
+            actor: actors,
+            tag: tags,
+            genre: genres,
+            num: Some(num),
+            releasedate,
+            cover,
+            website: None,
         })
     }
 

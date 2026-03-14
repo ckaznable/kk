@@ -72,6 +72,37 @@ impl Fc2Scraper {
         })
     }
 
+    /// Parse movie metadata from pre-fetched HTML string (used by cache server).
+    pub fn parse_html(&self, number: &str) -> impl Fn(&str) -> Result<Movie> + '_ {
+        let normalized_number = self.normalize_number(number);
+        move |html: &str| {
+            let document = Html::parse_document(html);
+            let title = self.extract_title(&document)?;
+            let outline = self.extract_outline(&document);
+            let cover = self.extract_cover(&document);
+            let actors = self.extract_actors(&document);
+            let tags = self.extract_tags(&document);
+            let releasedate = self.extract_release_date(&document);
+            let num = format!("FC2-{}", normalized_number);
+
+            Ok(Movie {
+                title,
+                outline,
+                poster: cover.clone(),
+                thumb: cover.clone(),
+                fanart: cover.clone(),
+                label: None,
+                actor: actors,
+                tag: tags.clone(),
+                genre: tags,
+                num: Some(num),
+                releasedate,
+                cover,
+                website: None,
+            })
+        }
+    }
+
     fn extract_title(&self, document: &Html) -> Result<String> {
         let title_selector = Selector::parse("title").unwrap();
 

@@ -35,16 +35,25 @@ impl KkCache {
             .unwrap_or_default()
     }
 
-    /// Look up a movie by its number (comparison is normalised).
+    /// Look up a movie by its number (comparison is normalised so both
+    /// "SSIS-123" and "SSIS123" will match the same entry).
     pub fn find(&self, number: &str) -> Option<&Movie> {
-        let key = normalise_key(number);
-        self.movies.get(&key)
+        let needle = normalise_key(number);
+        self.movies
+            .iter()
+            .find(|(k, _)| normalise_key(k) == needle)
+            .map(|(_, v)| v)
     }
 
     /// Insert / overwrite an entry and immediately persist to disk.
+    /// The key is stored as-is (with dashes preserved) so that the JSON
+    /// file remains human-readable (e.g. "SSIS-123" instead of "SSIS123").
     pub fn insert_and_flush(&mut self, number: &str, movie: Movie) {
-        let key = normalise_key(number);
-        self.movies.insert(key, movie);
+        // Remove any old entry whose normalised key collides with this one
+        // (handles the case where a previous dashless key already exists).
+        let needle = normalise_key(number);
+        self.movies.retain(|k, _| normalise_key(k) != needle);
+        self.movies.insert(number.to_string(), movie);
         self.flush();
     }
 

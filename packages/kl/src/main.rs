@@ -801,6 +801,7 @@ async fn recursive_scan_webdav(
                         added_time: std::time::SystemTime::now(),
                         fav: false,
                         markers: Vec::new(),
+                        pending_download: false,
                     });
 
                     // Flush after each successful scrape to avoid losing progress

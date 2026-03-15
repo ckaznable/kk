@@ -93,6 +93,8 @@ pub struct WebDavMovieData {
     pub fav: bool,
     #[serde(default)]
     pub markers: Vec<f64>,
+    #[serde(default)]
+    pub pending_download: bool,
 }
 
 impl WebDavMovieData {
@@ -168,6 +170,23 @@ impl WebDavDatabase {
             return movie.fav;
         }
         false
+    }
+
+    pub fn toggle_pending_download(&mut self, i: usize) -> bool {
+        if let Some(movie) = self.config.movies.get_mut(i) {
+            movie.pending_download = !movie.pending_download;
+            return movie.pending_download;
+        }
+        false
+    }
+
+    /// Return references to all movies that are marked as pending download.
+    pub fn pending_downloads(&self) -> Vec<&WebDavMovieData> {
+        self.config
+            .movies
+            .iter()
+            .filter(|m| m.pending_download)
+            .collect()
     }
 
     pub fn contains_id(&self, id: &str) -> bool {

@@ -1,8 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use base64::prelude::*;
+use futures_util::StreamExt;
 use reqwest::Client;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -127,7 +129,12 @@ impl WebDavClient {
             .into_iter()
             .map(|r| WebDavResource {
                 path: r.href,
-                is_dir: r.propstat.prop.resource_type.and_then(|rt| rt.collection).is_some(),
+                is_dir: r
+                    .propstat
+                    .prop
+                    .resource_type
+                    .and_then(|rt| rt.collection)
+                    .is_some(),
                 size: r.propstat.prop.content_length,
             })
             .collect();
@@ -148,5 +155,33 @@ impl WebDavClient {
             }
         }
         Ok(None)
+    }
+
+    /// Download a remote WebDAV file at `path` to the local `dest` path.
+    /// Progress is reported as bytes written to stdout.
+    pub async fn download(&self, path: &str, dest: &Path) -> Result<()> {
+        let url = self.base_url.join(path)?;
+        let resp = self.client.get(url).headers(self.headers()).send().await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("HTTP {} when downloading {}", resp.status(), path));
+        }
+
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut file = tokio::fs::File::create(dest).await?;
+        let mut stream = resp.bytes_stream();
+        let mut total: u64 = 0;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            total += chunk.len() as u64;
+            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+        }
+
+        println!("Downloaded {} bytes -> {:?}", total, dest);
+        Ok(())
     }
 }

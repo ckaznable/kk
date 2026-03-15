@@ -284,13 +284,13 @@ fn main() {
 
                                                 if is_webdav {
 
-                                                    let is_fav = wd_db.borrow().get_movie(item_index as usize).map(|m| m.fav).unwrap_or(false);
+                                                    let (is_fav, is_pending) = wd_db.borrow().get_movie(item_index as usize)
+                                                        .map(|m| (m.fav, m.pending_download))
+                                                        .unwrap_or((false, false));
 
-                                                    let wd_context_items = if is_fav {
-                                                        menu::MenuItem::new(&["Unfavorite", "Copy Path"])
-                                                    } else {
-                                                        menu::MenuItem::new(&["Favorite", "Copy Path"])
-                                                    };
+                                                    let fav_label = if is_fav { "Unfavorite" } else { "Favorite" };
+                                                    let dl_label  = if is_pending { "Unmark Download" } else { "Mark for Download" };
+                                                    let wd_context_items = menu::MenuItem::new(&[fav_label, "Copy Path", dl_label]);
 
                                                     if let Some(val) = wd_context_items.popup(x, y) {
                                                         let label = val.label().unwrap_or_default();
@@ -304,6 +304,10 @@ fn main() {
                                                             let url_path = wd_db.borrow().get_movie(item_index as usize).map(|m| m.url_path.clone()).unwrap_or_default();
                                                             app::copy(&url_path);
                                                             println!("Copied WebDAV path to clipboard: {}", url_path);
+                                                        } else if label == "Mark for Download" || label == "Unmark Download" {
+                                                            let new_status = wd_db.borrow_mut().toggle_pending_download(item_index as usize);
+                                                            wd_db.borrow().flush();
+                                                            println!("WebDAV Item {} pending_download: {}", item_index, new_status);
                                                         }
                                                     }
 

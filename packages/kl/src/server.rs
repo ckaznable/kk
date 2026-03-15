@@ -64,6 +64,30 @@ fn normalise_key(number: &str) -> String {
     number.to_uppercase().replace('-', "").replace('_', "")
 }
 
+/// If the number has no dash between the alphabetic prefix and the numeric
+/// suffix, insert one automatically (e.g. `"SSIS123"` → `"SSIS-123"`).
+/// IDs that already contain a dash, or non-standard formats, are returned
+/// unchanged.
+fn ensure_dash(number: &str) -> String {
+    // Already has a dash → nothing to do.
+    if number.contains('-') {
+        return number.to_string();
+    }
+
+    // Find the boundary where letters end and digits begin.
+    let boundary = number
+        .char_indices()
+        .find(|(_, c)| c.is_ascii_digit())
+        .map(|(i, _)| i);
+
+    match boundary {
+        // There is a letter prefix followed by digits → insert dash.
+        Some(i) if i > 0 => format!("{}-{}", &number[..i], &number[i..]),
+        // Pure digits, pure letters, or empty → leave as-is.
+        _ => number.to_string(),
+    }
+}
+
 // ── HTTP request/response types ──────────────────────────────────────────────
 
 #[derive(Deserialize, Debug)]
@@ -118,9 +142,13 @@ pub async fn run_server(port: u16) -> Result<()> {
 
 async fn handle_cache(
     axum::extract::State(cache): axum::extract::State<Arc<Mutex<KkCache>>>,
-    axum::Json(req): axum::Json<CacheRequest>,
+    axum::Json(mut req): axum::Json<CacheRequest>,
 ) -> axum::response::Response {
     use axum::{http::StatusCode, response::IntoResponse, Json};
+
+    // Auto-insert a dash between the alphabetic prefix and numeric suffix when
+    // the caller sends an ID without one (e.g. "SSIS123" → "SSIS-123").
+    req.num = ensure_dash(&req.num);
 
     let result = parse_request(&req);
 

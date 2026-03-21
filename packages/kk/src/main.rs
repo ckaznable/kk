@@ -290,7 +290,7 @@ fn main() {
 
                                                     let fav_label = if is_fav { "Unfavorite" } else { "Favorite" };
                                                     let dl_label  = if is_pending { "Unmark Download" } else { "Mark for Download" };
-                                                    let wd_context_items = menu::MenuItem::new(&[fav_label, "Copy Path", dl_label]);
+                                                    let wd_context_items = menu::MenuItem::new(&[fav_label, "Copy ID", "Copy Path", dl_label]);
 
                                                     if let Some(val) = wd_context_items.popup(x, y) {
                                                         let label = val.label().unwrap_or_default();
@@ -300,6 +300,10 @@ fn main() {
                                                             wd_db.borrow().flush();
                                                             redraw_menu_keep_page(menu.clone(), db.clone(), wd_db.clone(), menu.current_mode());
                                                             println!("WebDAV Item {} favorite status toggled: {}", item_index, new_fav_status);
+                                                        } else if label == "Copy ID" {
+                                                            let num = wd_db.borrow().get_movie(item_index as usize).and_then(|m| m.movie.num.clone()).unwrap_or_default();
+                                                            app::copy(&num);
+                                                            println!("Copied WebDAV movie ID to clipboard: {}", num);
                                                         } else if label == "Copy Path" {
                                                             let url_path = wd_db.borrow().get_movie(item_index as usize).map(|m| m.url_path.clone()).unwrap_or_default();
                                                             app::copy(&url_path);
@@ -323,11 +327,11 @@ fn main() {
 
                                                     let main_items = if is_fav {
 
-                                                        menu::MenuItem::new(&["Unfavorite", "Actors"])
+                                                        menu::MenuItem::new(&["Unfavorite", "Copy ID", "Actors"])
 
                                                     } else {
 
-                                                        menu::MenuItem::new(&["Favorite", "Actors"])
+                                                        menu::MenuItem::new(&["Favorite", "Copy ID", "Actors"])
 
                                                     };
 
@@ -346,6 +350,12 @@ fn main() {
                                                             redraw_menu_keep_page(menu.clone(), db.clone(), wd_db.clone(), menu.current_mode());
 
                                                             println!("Item {} favorite status toggled: {}", item_index, new_fav_status);
+
+                                                        } else if label == "Copy ID" {
+
+                                                            let num = db.borrow().get_movie(item_index as usize).and_then(|m| m.movie.num.clone()).unwrap_or_default();
+                                                            app::copy(&num);
+                                                            println!("Copied movie ID to clipboard: {}", num);
 
                                                         } else if label == "Actors" {
 

@@ -9,8 +9,9 @@ This project is organized as a Rust workspace with the following members:
 - **`packages/kk`**: The main GUI application. Built with [FLTK](https://fltk-rs.github.io/fltk-rs/) and [libmpv](https://mpv.io/). It provides a theater-like experience for browsing and playing local media. Now supports WebDAV streaming.
 - **`packages/kl`**: A CLI utility for scraping movie metadata, organizing files (tidying), and fixing database inconsistencies. Supports local and WebDAV-based scraping.
 - **`packages/kr`**: The core library containing shared data models (`Movie`, `Actor`) and database implementations for local and WebDAV metadata.
+- **`packages/ks`**: A centralized web server that hosts `kl`'s scraping endpoints and serves/stores the JSON databases (`kr.json`, `kwa_db.json`) for syncing across machines.
 - **`packages/kwa`**: A WebDAV client library and CLI tool for interacting with remote file servers.
-- **`packages/dirs`**: Manages system paths and environment configuration.
+- **`packages/dirs`**: Manages system paths, environment configuration, and `config.toml` parsing.
 
 ## Key Features
 
@@ -25,6 +26,10 @@ This project is organized as a Rust workspace with the following members:
   - **Local Scraping**: Scrapes metadata, generates `.nfo` files, and organizes videos.
   - **WebDAV Scraping**: Scrapes remote files and stores metadata in a dedicated WebDAV database (`kwa_db.json`) without downloading the videos.
   - Scrapes metadata, posters, and thumbnails (cached locally).
+- **Sync Server (`ks`)**:
+  - Hosts `kr.json` and `kwa_db.json` via REST API (`GET`/`PUT /db/kr`, `GET`/`PUT /db/kwa`).
+  - Proxies the `/cache` scraper endpoint from `kl`.
+  - Enables `kk` to pull databases on startup and push back on exit.
 - **WebDAV Support (`kwa`)**:
   - List remote directory contents and check path existence.
   - Generate authenticated stream URLs for MPV.
@@ -64,10 +69,30 @@ cargo run -p kl -- tidy --input ./new_videos --output D:\Media\Videos
 
 # Test scrape a single ID without saving anything
 cargo run -p kl -- test-scrape SSIS-123
+
+# Start the ks sync server (default port 7070)
+cargo run -p ks
+
+# Start ks with custom port and data directory
+cargo run -p ks -- -p 8080 -d /path/to/data
 ```
 
 ## Configuration and Persistence
 
-- **Local Database**: `%LOCALAPPDATA%\kk\kr.json`
-- **WebDAV Database**: `%LOCALAPPDATA%\kk\kwa_db.json`
+- **Local Database**: `<config_local_dir>/kr.json`
+- **WebDAV Database**: `<config_local_dir>/kwa_db.json`
+- **Config File**: `<config_local_dir>/config.toml`
 - **Thumbnails**: Cached in the user's local cache directory under `kk/thumbs`.
+
+### config.toml
+
+Optional configuration file. Currently supports:
+
+```toml
+[ks]
+base_url = "http://your-server:7070"
+```
+
+When `ks.base_url` is set:
+- **`kk`** pulls `kr.json` and `kwa_db.json` from `ks` on startup (overwriting local copies), and pushes them back on exit.
+- **`kl`** pushes `kr.json` to `ks` after completing a `tidy` operation.

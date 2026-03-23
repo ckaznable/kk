@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::SimpleJsonDatabase;
 
 pub mod db;
+pub mod sync;
 pub mod util;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

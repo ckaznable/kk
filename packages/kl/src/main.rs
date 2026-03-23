@@ -1026,6 +1026,14 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
     db.flush();
     println!("Database flushed.");
 
+    // Push to ks server if configured
+    if let Some(ref url) = dirs::ks_base_url() {
+        println!("[tidy] Syncing kr.json to ks...");
+        if let Err(e) = kr::sync::push_kr(url) {
+            eprintln!("[tidy] Failed to push kr.json to ks: {}", e);
+        }
+    }
+
     Ok(())
 }
 

@@ -54,6 +54,36 @@ fn main() {
         std::env::set_var("WAYLAND_DISPLAY", "");
     }
 
+    // ── KS sync on startup ───────────────────────────────────────────────
+    let ks_url = dirs::ks_base_url();
+    if let Some(ref url) = ks_url {
+        println!("[kk] ks configured: {}", url);
+
+        // Pull kr.json: if ks is empty, push our local copy up
+        match kr::sync::pull_kr(url) {
+            Ok(true) => println!("[kk] kr.json pulled from ks."),
+            Ok(false) => {
+                println!("[kk] ks has no kr.json yet, pushing local copy...");
+                if let Err(e) = kr::sync::push_kr(url) {
+                    eprintln!("[kk] Failed to push kr.json to ks: {}", e);
+                }
+            }
+            Err(e) => eprintln!("[kk] Failed to pull kr.json from ks: {}", e),
+        }
+
+        // Pull kwa_db.json: if ks is empty, push our local copy up
+        match kr::sync::pull_kwa(url) {
+            Ok(true) => println!("[kk] kwa_db.json pulled from ks."),
+            Ok(false) => {
+                println!("[kk] ks has no kwa_db.json yet, pushing local copy...");
+                if let Err(e) = kr::sync::push_kwa(url) {
+                    eprintln!("[kk] Failed to push kwa_db.json to ks: {}", e);
+                }
+            }
+            Err(e) => eprintln!("[kk] Failed to pull kwa_db.json from ks: {}", e),
+        }
+    }
+
     let mut db = kr::init();
     db.load_config(&SEARCH_PATH).ok();
     let db = Rc::new(RefCell::new(db));
@@ -690,6 +720,20 @@ fn main() {
                 }
             }
             End => break,
+        }
+    }
+
+    // ── KS sync on exit ──────────────────────────────────────────────────
+    if let Some(ref url) = ks_url {
+        println!("[kk] Syncing databases back to ks...");
+        // Flush first to ensure local files are up to date
+        db.borrow().flush();
+        wd_db.borrow().flush();
+        if let Err(e) = kr::sync::push_kr(url) {
+            eprintln!("[kk] Failed to push kr.json to ks: {}", e);
+        }
+        if let Err(e) = kr::sync::push_kwa(url) {
+            eprintln!("[kk] Failed to push kwa_db.json to ks: {}", e);
         }
     }
 }

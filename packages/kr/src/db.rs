@@ -149,7 +149,7 @@ impl WebDavDatabase {
     }
 
     #[inline]
-    fn config_path() -> PathBuf {
+    pub fn config_path() -> PathBuf {
         dirs::DIR.config_local_dir().join("kwa_db.json")
     }
 
@@ -269,7 +269,7 @@ impl SimpleJsonDatabase {
     }
 
     #[inline]
-    fn config_path() -> PathBuf {
+    pub fn config_path() -> PathBuf {
         dirs::DIR.config_local_dir().join("kr.json")
     }
 

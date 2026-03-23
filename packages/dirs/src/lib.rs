@@ -1,6 +1,7 @@
 use std::{env, path::PathBuf, sync::LazyLock};
 
 use directories::ProjectDirs;
+use serde::Deserialize;
 
 pub static DIR: LazyLock<ProjectDirs> = LazyLock::new(|| ProjectDirs::from("", "", "kk").unwrap());
 
@@ -22,3 +23,42 @@ pub static WEBDAV_USER: LazyLock<Option<String>> = LazyLock::new(|| env::var("KK
 pub static WEBDAV_PASS: LazyLock<Option<String>> = LazyLock::new(|| env::var("KK_WEBDAV_PASS").ok());
 
 pub static JAVDB_COOKIE: LazyLock<Option<String>> = LazyLock::new(|| env::var("KK_JAVDB_COOKIE").ok());
+
+// ── config.toml ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct AppConfig {
+    pub ks: Option<KsConfig>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct KsConfig {
+    pub base_url: Option<String>,
+}
+
+/// Path to config.toml: `<config_local_dir>/config.toml`
+pub fn config_toml_path() -> PathBuf {
+    DIR.config_local_dir().join("config.toml")
+}
+
+/// Load `config.toml` from the standard config directory.
+/// Returns `AppConfig::default()` when the file is missing or unparseable.
+pub fn load_config() -> AppConfig {
+    let path = config_toml_path();
+    if !path.exists() {
+        return AppConfig::default();
+    }
+
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Convenience: return the ks base_url if configured.
+pub fn ks_base_url() -> Option<String> {
+    load_config()
+        .ks
+        .and_then(|ks| ks.base_url)
+        .filter(|u| !u.is_empty())
+}

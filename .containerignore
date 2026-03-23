@@ -1,0 +1,25 @@
+# Git
+.git
+.gitignore
+
+# Rust build output (最大宗，一定要排除)
+target/
+
+# 容器相關
+Containerfile*
+.containerignore
+
+# 文件 / 開發工具設定
+*.md
+.gemini/
+.vscode/
+.idea/
+
+# 本地資料檔案 (不應打包進 image)
+ks_data/
+**/*.json
+**/*.toml.local
+
+# OS 產生的垃圾檔
+.DS_Store
+Thumbs.db

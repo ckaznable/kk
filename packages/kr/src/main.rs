@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dirs::DIR;
 use kr::db::SimpleJsonDatabase;
 use std::collections::HashMap;
 
@@ -19,6 +18,14 @@ enum Commands {
     Dedupe,
     /// find movies with duplicate num (番號) and list their absolute paths
     DupNum,
+    /// update thumbnail paths in the DB to use existing cache files
+    FixThumb,
+    /// push both kr.json and kwa_db.json to the ks sync server
+    Push {
+        /// ks server base URL (overrides config.toml)
+        #[arg(short, long)]
+        url: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -27,6 +34,8 @@ fn main() -> Result<()> {
         Some(Commands::Cache) => cache(),
         Some(Commands::Dedupe) => dedupe(),
         Some(Commands::DupNum) => dup_num(),
+        Some(Commands::FixThumb) => fix_thumb(),
+        Some(Commands::Push { url }) => push(url),
         _ => Ok(()),
     }
 }
@@ -148,6 +157,69 @@ fn dup_num() -> Result<()> {
     } else {
         println!("Found {} duplicate number(s).", dup_count);
     }
+
+    Ok(())
+}
+
+fn fix_thumb() -> Result<()> {
+    let mut db = SimpleJsonDatabase::new()?;
+    let cache_dir = &*dirs::THUMB_CACHE_DIR;
+    let mut updated_count = 0;
+
+    for movie in db.config.movies.iter_mut() {
+        let Some(ref thumb) = movie.movie.thumb.clone() else {
+            continue;
+        };
+
+        // Determine the folder name (番號) from the NFO path
+        let abs_path = movie.abs_path();
+        let Some(folder_name) = abs_path.parent().and_then(|p| p.file_name()) else {
+            continue;
+        };
+        let folder_name = folder_name.to_string_lossy();
+
+        // Get extension from the current thumb value
+        let thumb_path = std::path::Path::new(thumb);
+        let Some(ext) = thumb_path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+
+        // Build the expected cache filename
+        let cache_filename = format!("{}.{}", folder_name, ext);
+        let cache_path = cache_dir.join(&cache_filename);
+
+        // Skip if already pointing to the cache file
+        if thumb == &cache_filename {
+            continue;
+        }
+
+        // Update only if the cache file already exists
+        if cache_path.exists() {
+            println!("Updating thumb for {:?}: {} -> {}", abs_path, thumb, cache_filename);
+            movie.movie.thumb = Some(cache_filename);
+            updated_count += 1;
+        }
+    }
+
+    if updated_count > 0 {
+        db.flush();
+        println!("Updated {} thumbnail path(s). Database saved.", updated_count);
+    } else {
+        println!("No thumbnail paths needed updating.");
+    }
+
+    Ok(())
+}
+
+fn push(url: Option<String>) -> Result<()> {
+    let base_url = url
+        .or_else(dirs::ks_base_url)
+        .ok_or_else(|| anyhow::anyhow!(
+            "No ks base URL provided. Pass --url or set ks.base_url in config.toml"
+        ))?;
+
+    kr::sync::push_kr(&base_url)?;
+    kr::sync::push_kwa(&base_url)?;
 
     Ok(())
 }

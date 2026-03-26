@@ -1,6 +1,6 @@
 use anyhow::Result;
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -13,6 +13,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tower_http::cors::CorsLayer;
+use tracing::{error, info, warn};
 
 // ── Server State ─────────────────────────────────────────────────────────────
 
@@ -60,6 +61,24 @@ fn err_json(status: StatusCode, msg: impl ToString) -> Response {
         .into_response()
 }
 
+// ── Size guard helper ────────────────────────────────────────────────────────
+
+/// Returns `true` if `incoming_len` is suspiciously smaller than the current
+/// file on disk (less than 90 % of its size). When `true` the caller should
+/// reject the request to avoid overwriting a larger database with a
+/// truncated / stale payload.
+async fn is_suspiciously_small(path: &PathBuf, incoming_len: usize) -> bool {
+    if let Ok(meta) = tokio::fs::metadata(path).await {
+        let current_size = meta.len() as usize;
+        if current_size > 0 {
+            // threshold: 90 % of the cached file size
+            let threshold = current_size * 9 / 10;
+            return incoming_len < threshold;
+        }
+    }
+    false
+}
+
 // ── Handlers: kr.json ────────────────────────────────────────────────────────
 
 async fn get_kr(State(state): State<AppState>) -> Response {
@@ -82,9 +101,25 @@ async fn get_kr(State(state): State<AppState>) -> Response {
 
 async fn put_kr(State(state): State<AppState>, body: String) -> Response {
     let path = state.kr_path();
+
     // Validate JSON
     if serde_json::from_str::<serde_json::Value>(&body).is_err() {
         return err_json(StatusCode::BAD_REQUEST, "Invalid JSON");
+    }
+
+    // Size guard: reject if incoming payload is < 90 % of the cached file
+    if is_suspiciously_small(&path, body.len()).await {
+        let current = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+        warn!(
+            incoming_bytes = body.len(),
+            current_bytes = current,
+            file = "kr.json",
+            "Rejected PUT – incoming payload is less than 90 % of cached size"
+        );
+        return err_json(
+            StatusCode::CONFLICT,
+            "Rejected: incoming payload is suspiciously smaller than the cached database",
+        );
     }
 
     if let Some(parent) = path.parent() {
@@ -93,10 +128,13 @@ async fn put_kr(State(state): State<AppState>, body: String) -> Response {
 
     match tokio::fs::write(&path, &body).await {
         Ok(_) => {
-            println!("[ks] Updated kr.json ({} bytes)", body.len());
+            info!(bytes = body.len(), file = "kr.json", "Database updated");
             ok_json()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => {
+            error!(error = %e, file = "kr.json", "Failed to write database");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
     }
 }
 
@@ -122,8 +160,24 @@ async fn get_kwa(State(state): State<AppState>) -> Response {
 
 async fn put_kwa(State(state): State<AppState>, body: String) -> Response {
     let path = state.kwa_path();
+
     if serde_json::from_str::<serde_json::Value>(&body).is_err() {
         return err_json(StatusCode::BAD_REQUEST, "Invalid JSON");
+    }
+
+    // Size guard: reject if incoming payload is < 90 % of the cached file
+    if is_suspiciously_small(&path, body.len()).await {
+        let current = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+        warn!(
+            incoming_bytes = body.len(),
+            current_bytes = current,
+            file = "kwa_db.json",
+            "Rejected PUT – incoming payload is less than 90 % of cached size"
+        );
+        return err_json(
+            StatusCode::CONFLICT,
+            "Rejected: incoming payload is suspiciously smaller than the cached database",
+        );
     }
 
     if let Some(parent) = path.parent() {
@@ -132,10 +186,13 @@ async fn put_kwa(State(state): State<AppState>, body: String) -> Response {
 
     match tokio::fs::write(&path, &body).await {
         Ok(_) => {
-            println!("[ks] Updated kwa_db.json ({} bytes)", body.len());
+            info!(bytes = body.len(), file = "kwa_db.json", "Database updated");
             ok_json()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => {
+            error!(error = %e, file = "kwa_db.json", "Failed to write database");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
     }
 }
 
@@ -154,7 +211,7 @@ async fn handle_cache(
                 let mut cache = state.cache.lock().unwrap();
                 cache.insert_and_flush(&req.num, movie);
             }
-            println!("[ks/cache] Stored: {} ({})", num, title);
+            info!(num = %num, title = %title, "Cache entry stored");
 
             #[derive(Serialize)]
             struct CacheOk {
@@ -173,7 +230,7 @@ async fn handle_cache(
                 .into_response()
         }
         Err(e) => {
-            eprintln!("[ks/cache] Parse error for {}: {}", req.num, e);
+            error!(num = %req.num, error = %e, "Cache parse error");
             err_json(StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
         }
     }
@@ -212,6 +269,13 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     use clap::Parser;
     let cli = Cli::parse();
 
@@ -226,15 +290,18 @@ async fn main() -> Result<()> {
         cache: Arc::new(Mutex::new(kl::server::KkCache::load())),
     };
 
+    const MAX_BODY: usize = 20 * 1024 * 1024; // 20 MB
+
     let app = Router::new()
         .route("/db/kr", get(get_kr).put(put_kr))
         .route("/db/kwa", get(get_kwa).put(put_kwa))
         .route("/cache", post(handle_cache))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(CorsLayer::permissive());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
-    println!("ks server listening on http://{}", addr);
+    info!("ks server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

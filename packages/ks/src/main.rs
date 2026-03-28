@@ -95,6 +95,7 @@ struct DownloadQueueFile {
 #[serde(rename_all = "snake_case")]
 enum PendingStatus {
     Queued,
+    #[serde(alias = "running")]
     Downloading,
 }
 
@@ -116,6 +117,10 @@ struct ReadyDownload {
     id: String,
     url_path: String,
     file_name: String,
+    #[serde(default)]
+    stored_path: String,
+    // Backward compatibility: old queue snapshots stored `stored_name` only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     stored_name: String,
     size_bytes: u64,
     finished_at: u64,
@@ -144,15 +149,24 @@ struct DownloadManager {
     state: Arc<AsyncMutex<DownloadQueueFile>>,
     queue_path: PathBuf,
     cache_dir: PathBuf,
+    download_dir: PathBuf,
+    source_prefixes: Vec<String>,
     max_total_bytes: u64,
 }
 
 impl DownloadManager {
-    async fn load(queue_path: PathBuf, cache_dir: PathBuf, max_total_bytes: u64) -> Result<Self> {
+    async fn load(
+        queue_path: PathBuf,
+        cache_dir: PathBuf,
+        download_dir: PathBuf,
+        source_prefixes: Vec<String>,
+        max_total_bytes: u64,
+    ) -> Result<Self> {
         if let Some(parent) = queue_path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
         tokio::fs::create_dir_all(&cache_dir).await.ok();
+        tokio::fs::create_dir_all(&download_dir).await.ok();
 
         let mut queue: DownloadQueueFile = match tokio::fs::read_to_string(&queue_path).await {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
@@ -170,6 +184,8 @@ impl DownloadManager {
             state: Arc::new(AsyncMutex::new(queue.clone())),
             queue_path,
             cache_dir,
+            download_dir,
+            source_prefixes,
             max_total_bytes,
         };
 
@@ -196,11 +212,17 @@ impl DownloadManager {
         let file_name = req
             .file_name
             .filter(|s| !s.is_empty())
+            .and_then(|name| {
+                FsPath::new(&name)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            })
             .or_else(|| {
                 FsPath::new(&req.url_path)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
             })
+            .map(|name| sanitize_filename(&name))
             .unwrap_or_else(|| "download.bin".to_string());
         let source_user = req.source_user.or_else(|| dirs::WEBDAV_USER.clone());
         let source_pass = req.source_pass.or_else(|| dirs::WEBDAV_PASS.clone());
@@ -268,7 +290,7 @@ impl DownloadManager {
         Ok(())
     }
 
-    async fn mark_ready(&self, id: &str, stored_name: String, size_bytes: u64) -> Result<()> {
+    async fn mark_ready(&self, id: &str, stored_path: PathBuf, size_bytes: u64) -> Result<()> {
         let mut state = self.state.lock().await;
         let Some(pos) = state.pending.iter().position(|d| d.id == id) else {
             return Ok(());
@@ -279,7 +301,8 @@ impl DownloadManager {
             id: queued.id,
             url_path: queued.url_path,
             file_name: queued.file_name,
-            stored_name,
+            stored_path: stored_path.to_string_lossy().to_string(),
+            stored_name: String::new(),
             size_bytes,
             finished_at: now_ts(),
         });
@@ -307,11 +330,14 @@ impl DownloadManager {
 
     async fn ready_file_info(&self, id: &str) -> Option<(PathBuf, String)> {
         let state = self.state.lock().await;
-        state
-            .ready
-            .iter()
-            .find(|r| r.id == id)
-            .map(|r| (self.cache_dir.join(&r.stored_name), r.file_name.clone()))
+        state.ready.iter().find(|r| r.id == id).map(|r| {
+            let path = if !r.stored_path.is_empty() {
+                PathBuf::from(&r.stored_path)
+            } else {
+                self.cache_dir.join(&r.stored_name)
+            };
+            (path, r.file_name.clone())
+        })
     }
 
     async fn delete_ready(&self, id: &str) -> Result<bool> {
@@ -326,7 +352,11 @@ impl DownloadManager {
 
         self.persist_snapshot(&snapshot).await?;
 
-        let f = self.cache_dir.join(ready.stored_name);
+        let f = if !ready.stored_path.is_empty() {
+            PathBuf::from(ready.stored_path)
+        } else {
+            self.cache_dir.join(ready.stored_name)
+        };
         if let Err(e) = tokio::fs::remove_file(&f).await {
             if e.kind() != std::io::ErrorKind::NotFound {
                 warn!(error = %e, path = %f.display(), "Failed to remove cached file");
@@ -362,7 +392,7 @@ impl DownloadManager {
     }
 
     async fn total_cache_size(&self) -> u64 {
-        let dir = self.cache_dir.clone();
+        let dir = self.download_dir.clone();
         tokio::task::spawn_blocking(move || dir_size_bytes(&dir))
             .await
             .unwrap_or(0)
@@ -391,6 +421,48 @@ fn sanitize_filename(name: &str) -> String {
     } else {
         out
     }
+}
+
+fn normalize_webdav_prefix(prefix: &str) -> String {
+    let mut p = prefix.trim().replace('\\', "/");
+    if p.is_empty() {
+        return "/".to_string();
+    }
+    if !p.starts_with('/') {
+        p.insert(0, '/');
+    }
+    while p.ends_with('/') && p.len() > 1 {
+        p.pop();
+    }
+    p
+}
+
+fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if !original.trim().is_empty() {
+        out.push(original.to_string());
+    }
+
+    let Some(file_name) = FsPath::new(original)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+    else {
+        return out;
+    };
+
+    for prefix in source_prefixes {
+        let base = normalize_webdav_prefix(prefix);
+        let candidate = if base == "/" {
+            format!("/{}", file_name)
+        } else {
+            format!("{}/{}", base, file_name)
+        };
+        if !out.iter().any(|p| p == &candidate) {
+            out.push(candidate);
+        }
+    }
+
+    out
 }
 
 fn dir_size_bytes(path: &FsPath) -> u64 {
@@ -475,29 +547,68 @@ async fn download_worker_loop(manager: DownloadManager) {
             }
         };
 
-        let stored_name = format!("{}__{}", next.id, sanitize_filename(&next.file_name));
-        let dest = manager.cache_dir.join(&stored_name);
+        let dest = manager.download_dir.join(&next.file_name);
+        let candidate_paths =
+            build_webdav_candidate_paths(&next.url_path, &manager.source_prefixes);
+        if candidate_paths.is_empty() {
+            error!(id = %next.id, path = %next.url_path, "No valid WebDAV source path to try");
+            if let Err(e) = manager.set_queued(&next.id).await {
+                error!(error = %e, id = %next.id, "Failed to reset queued status");
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            continue;
+        }
 
-        info!(id = %next.id, path = %next.url_path, "Starting WebDAV background download");
-        match client.download(&next.url_path, &dest).await {
-            Ok(()) => {
-                let size = tokio::fs::metadata(&dest)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                if let Err(e) = manager.mark_ready(&next.id, stored_name, size).await {
-                    error!(error = %e, id = %next.id, "Failed to mark task as ready");
-                } else {
-                    info!(id = %next.id, bytes = size, "WebDAV download completed");
+        info!(
+            id = %next.id,
+            path = %next.url_path,
+            candidates = ?candidate_paths,
+            "Starting WebDAV background download"
+        );
+
+        let mut downloaded_from: Option<String> = None;
+        let mut last_error: Option<String> = None;
+        for path in &candidate_paths {
+            match client.download(path, &dest).await {
+                Ok(()) => {
+                    downloaded_from = Some(path.clone());
+                    break;
+                }
+                Err(e) => {
+                    warn!(error = %e, id = %next.id, path = %path, "WebDAV download attempt failed");
+                    last_error = Some(e.to_string());
                 }
             }
-            Err(e) => {
-                error!(error = %e, id = %next.id, path = %next.url_path, "WebDAV download failed");
-                if let Err(e) = manager.set_queued(&next.id).await {
-                    error!(error = %e, id = %next.id, "Failed to reset queued status");
-                }
-                tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+
+        if let Some(remote_path) = downloaded_from {
+            let size = tokio::fs::metadata(&dest)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if let Err(e) = manager.mark_ready(&next.id, dest.clone(), size).await {
+                error!(error = %e, id = %next.id, "Failed to mark task as ready");
+            } else {
+                info!(
+                    id = %next.id,
+                    path = %remote_path,
+                    bytes = size,
+                    "WebDAV download completed"
+                );
             }
+        } else {
+            let err = last_error.unwrap_or_else(|| "unknown error".to_string());
+            error!(
+                id = %next.id,
+                path = %next.url_path,
+                error = %err,
+                tried_paths = ?candidate_paths,
+                "WebDAV download failed"
+            );
+            if let Err(e) = manager.set_queued(&next.id).await {
+                error!(error = %e, id = %next.id, "Failed to reset queued status");
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
     }
 }
@@ -801,15 +912,25 @@ async fn main() -> Result<()> {
     let queue_path = dirs::DIR.config_local_dir().join("ks_webdav_pending.json");
     let cache_dir =
         dirs::ks_download_cache_dir().unwrap_or_else(|| data_dir.join("ks_webdav_cache"));
+    let download_dir = dirs::ks_download_target_dir().unwrap_or_else(|| cache_dir.clone());
+    let source_prefixes = dirs::ks_webdav_source_prefixes();
     let max_total_bytes = dirs::ks_download_max_total_bytes().unwrap_or(200 * 1024 * 1024 * 1024); // 200 GiB
 
-    let downloads = DownloadManager::load(queue_path.clone(), cache_dir.clone(), max_total_bytes)
-        .await
-        .with_context(|| "Failed to initialize download manager")?;
+    let downloads = DownloadManager::load(
+        queue_path.clone(),
+        cache_dir.clone(),
+        download_dir.clone(),
+        source_prefixes.clone(),
+        max_total_bytes,
+    )
+    .await
+    .with_context(|| "Failed to initialize download manager")?;
 
     info!(
         queue_path = %queue_path.display(),
         cache_dir = %cache_dir.display(),
+        download_dir = %download_dir.display(),
+        source_prefixes = ?source_prefixes,
         max_total_bytes,
         "Initialized WebDAV background download queue"
     );
@@ -852,4 +973,76 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_status_accepts_running_alias() {
+        let status: PendingStatus = serde_json::from_str("\"running\"").unwrap();
+        assert_eq!(status, PendingStatus::Downloading);
+    }
+
+    #[tokio::test]
+    async fn load_treats_running_as_unfinished() {
+        let uniq = format!("ks-queue-test-{}-{}", std::process::id(), now_ts());
+        let base = std::env::temp_dir().join(uniq);
+        let queue_path = base.join("ks_webdav_pending.json");
+        let cache_dir = base.join("cache");
+        let download_dir = base.join("downloads");
+        tokio::fs::create_dir_all(&base).await.unwrap();
+
+        let snapshot = r#"{
+  "pending": [
+    {
+      "id": "1",
+      "url_path": "/a.mp4",
+      "file_name": "a.mp4",
+      "file_size": 1,
+      "source_base_url": "https://example.com",
+      "source_user": null,
+      "source_pass": null,
+      "status": "running",
+      "enqueued_at": 1
+    },
+    {
+      "id": "2",
+      "url_path": "/b.mp4",
+      "file_name": "b.mp4",
+      "file_size": 2,
+      "source_base_url": "https://example.com",
+      "source_user": null,
+      "source_pass": null,
+      "status": "downloading",
+      "enqueued_at": 2
+    }
+  ],
+  "ready": []
+}"#;
+        tokio::fs::write(&queue_path, snapshot).await.unwrap();
+
+        let manager = DownloadManager::load(
+            queue_path.clone(),
+            cache_dir,
+            download_dir,
+            Vec::new(),
+            1024,
+        )
+        .await
+        .unwrap();
+
+        let state = manager.state.lock().await;
+        assert_eq!(state.pending.len(), 2);
+        assert!(
+            state
+                .pending
+                .iter()
+                .all(|item| item.status == PendingStatus::Queued)
+        );
+        drop(state);
+
+        let _ = tokio::fs::remove_dir_all(base).await;
+    }
 }

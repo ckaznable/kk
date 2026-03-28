@@ -4,6 +4,30 @@
 //! `kk` GUI thread without pulling in a tokio runtime.
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KsWebDavEnqueueRequest {
+    pub url_path: String,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+    #[serde(default)]
+    pub source_base_url: Option<String>,
+    #[serde(default)]
+    pub source_user: Option<String>,
+    #[serde(default)]
+    pub source_pass: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KsReadyDownload {
+    pub id: String,
+    pub url_path: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+}
 
 /// Fetch `kr.json` content from the ks server and overwrite the local file.
 /// Returns `true` if ks had data (local file overwritten),
@@ -97,5 +121,16 @@ pub fn push_kwa(base_url: &str) -> Result<()> {
         anyhow::bail!("ks returned {} for PUT /db/kwa", resp.status());
     }
     println!("[sync] kwa_db.json pushed ({} bytes)", body.len());
+    Ok(())
+}
+
+/// Enqueue a WebDAV path on ks for background downloading.
+pub fn enqueue_webdav_download(base_url: &str, req: &KsWebDavEnqueueRequest) -> Result<()> {
+    let url = format!("{}/downloads/webdav", base_url.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::new();
+    let resp = client.post(&url).json(req).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("ks returned {} for POST /downloads/webdav", resp.status());
+    }
     Ok(())
 }

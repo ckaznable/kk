@@ -88,6 +88,8 @@ impl MovieData {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WebDavMovieData {
     pub url_path: String, // Path relative to WebDAV base
+    #[serde(default)]
+    pub file_size: Option<u64>,
     pub movie: Movie,
     pub added_time: SystemTime,
     pub fav: bool,

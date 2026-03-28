@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use kl::Scraper;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{thread, time::Duration};
 use walkdir::WalkDir;
 
@@ -97,6 +97,21 @@ enum Commands {
         #[arg(short, long, default_value = "6969")]
         port: u16,
     },
+
+    /// Pull ready WebDAV downloads from ks, tidy locally, then delete ks cache
+    PullKs {
+        /// ks server base URL (overrides config.toml)
+        #[arg(long)]
+        url: Option<String>,
+
+        /// Destination media root (defaults to KK_SEARCH_PATH)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Only list ks-ready files without downloading/tidying
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -137,6 +152,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Serve { port } => {
             kl::server::run_server(port).await?;
+        }
+        Commands::PullKs {
+            url,
+            output,
+            dry_run,
+        } => {
+            let output_path = output.unwrap_or_else(|| dirs::SEARCH_PATH.to_path_buf());
+            run_pull_ks_downloads(url, output_path, dry_run).await?;
         }
     }
     Ok(())
@@ -625,6 +648,134 @@ async fn run_webdav_scraper(
     Ok(())
 }
 
+async fn run_pull_ks_downloads(
+    url: Option<String>,
+    output: PathBuf,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let base_url = url
+        .or_else(dirs::ks_base_url)
+        .ok_or_else(|| anyhow::anyhow!("No ks base URL provided. Pass --url or set ks.base_url"))?;
+    let base_url = base_url.trim_end_matches('/').to_string();
+
+    let client = reqwest::Client::new();
+    let list_url = format!("{}/downloads/webdav/ready", base_url);
+    let list_resp = client.get(&list_url).send().await?;
+    if !list_resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "ks returned {} for GET /downloads/webdav/ready",
+            list_resp.status()
+        ));
+    }
+
+    let ready: Vec<kr::sync::KsReadyDownload> = list_resp.json().await?;
+    if ready.is_empty() {
+        println!("No ready downloads on ks.");
+        return Ok(());
+    }
+
+    println!("Found {} ready download(s) on ks.", ready.len());
+    if dry_run {
+        for item in ready {
+            println!(
+                "  [{}] {} ({} bytes) <- {}",
+                item.id, item.file_name, item.size_bytes, item.url_path
+            );
+        }
+        return Ok(());
+    }
+
+    let staging_dir = dirs::DIR.config_local_dir().join("ks_ready_staging");
+    if !staging_dir.exists() {
+        fs::create_dir_all(&staging_dir)?;
+    }
+
+    let mut downloaded: Vec<(String, PathBuf)> = Vec::new();
+    for item in ready {
+        let file_url = format!("{}/downloads/webdav/ready/{}/file", base_url, item.id);
+        let resp = client.get(&file_url).send().await?;
+        if !resp.status().is_success() {
+            eprintln!(
+                "Failed to download {} from ks: HTTP {}",
+                item.file_name,
+                resp.status()
+            );
+            continue;
+        }
+
+        let bytes = resp.bytes().await?;
+        let path = unique_stage_path(&staging_dir, &item.file_name);
+        fs::write(&path, &bytes)?;
+        println!("Downloaded from ks: {} -> {:?}", item.file_name, path);
+        downloaded.push((item.id, path));
+    }
+
+    if downloaded.is_empty() {
+        println!("No files downloaded from ks.");
+        return Ok(());
+    }
+
+    run_scraper(staging_dir.clone(), output).await?;
+
+    let mut deleted_count = 0usize;
+    for (id, local_path) in downloaded {
+        if local_path.exists() {
+            eprintln!(
+                "Skip ks delete for {}: local file still exists after tidy ({:?})",
+                id, local_path
+            );
+            continue;
+        }
+
+        let delete_url = format!("{}/downloads/webdav/ready/{}", base_url, id);
+        let del_resp = client.delete(&delete_url).send().await?;
+        if del_resp.status().is_success() {
+            deleted_count += 1;
+        } else {
+            eprintln!(
+                "Failed to delete ks ready item {}: HTTP {}",
+                id,
+                del_resp.status()
+            );
+        }
+    }
+
+    println!(
+        "Completed ks pull workflow. Deleted {} ready item(s) from ks.",
+        deleted_count
+    );
+    Ok(())
+}
+
+fn unique_stage_path(dir: &Path, file_name: &str) -> PathBuf {
+    let mut candidate = dir.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let stem = Path::new(file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".to_string());
+    let ext = Path::new(file_name)
+        .extension()
+        .map(|s| s.to_string_lossy().to_string());
+
+    let mut n = 1usize;
+    loop {
+        let alt_name = if let Some(ref e) = ext {
+            format!("{}-{}.{}", stem, n, e)
+        } else {
+            format!("{}-{}", stem, n)
+        };
+        candidate = dir.join(alt_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 #[async_recursion::async_recursion]
 async fn recursive_scan_webdav(
     client: &kwa::WebDavClient,
@@ -797,6 +948,7 @@ async fn recursive_scan_webdav(
 
                     db.config.movies.push(kr::db::WebDavMovieData {
                         url_path: res_path,
+                        file_size: res.size,
                         movie,
                         added_time: std::time::SystemTime::now(),
                         fav: false,

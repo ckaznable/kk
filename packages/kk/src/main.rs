@@ -259,8 +259,9 @@ fn main() {
         false
     }));
 
+    let ks_url_for_menu = ks_url.clone();
     let mut mouse_event_throttle = 0u8;
-    win.handle(enclose!((app_tx, mpv_tx, in_video, mut menu, db, wd_db) move |win, ev| {
+    win.handle(enclose!((app_tx, mpv_tx, in_video, mut menu, db, wd_db, ks_url_for_menu) move |win, ev| {
         match ev {
             Event::Move => {
                 mouse_event_throttle = if mouse_event_throttle > 3 {
@@ -310,7 +311,7 @@ fn main() {
 
                                                 let is_webdav = matches!(menu.current_mode(), MenuMode::WebDav);
 
-                    
+
 
                                                 if is_webdav {
 
@@ -319,8 +320,14 @@ fn main() {
                                                         .unwrap_or((false, false));
 
                                                     let fav_label = if is_fav { "Unfavorite" } else { "Favorite" };
-                                                    let dl_label  = if is_pending { "Unmark Download" } else { "Mark for Download" };
-                                                    let wd_context_items = menu::MenuItem::new(&[fav_label, "Copy ID", "Copy Path", dl_label]);
+                                                    let dl_label = if is_pending { "Unmark Download" } else { "Mark for Download" };
+                                                    let wd_context_items = menu::MenuItem::new(&[
+                                                        fav_label,
+                                                        "Copy ID",
+                                                        "Copy Path",
+                                                        dl_label,
+                                                        "Queue Download on KS",
+                                                    ]);
 
                                                     if let Some(val) = wd_context_items.popup(x, y) {
                                                         let label = val.label().unwrap_or_default();
@@ -342,6 +349,48 @@ fn main() {
                                                             let new_status = wd_db.borrow_mut().toggle_pending_download(item_index as usize);
                                                             wd_db.borrow().flush();
                                                             println!("WebDAV Item {} pending_download: {}", item_index, new_status);
+                                                        } else if label == "Queue Download on KS" {
+                                                            if let Some(ref base_url) = ks_url_for_menu {
+                                                                let (req_opt, movie_num) = {
+                                                                    let wd_ref = wd_db.borrow();
+                                                                    let source_base_url = if !wd_ref.config.base_url.is_empty() {
+                                                                        Some(wd_ref.config.base_url.clone())
+                                                                    } else {
+                                                                        dirs::WEBDAV_URL.clone()
+                                                                    };
+                                                                    let source_user = wd_ref.config.user.clone().or_else(|| dirs::WEBDAV_USER.clone());
+                                                                    let source_pass = wd_ref.config.pass.clone().or_else(|| dirs::WEBDAV_PASS.clone());
+                                                                    let movie = wd_ref.get_movie(item_index as usize).cloned();
+
+                                                                    if let Some(m) = movie {
+                                                                        let file_name = std::path::Path::new(&m.url_path)
+                                                                            .file_name()
+                                                                            .map(|n| n.to_string_lossy().to_string());
+                                                                        (
+                                                                            Some(kr::sync::KsWebDavEnqueueRequest {
+                                                                                url_path: m.url_path.clone(),
+                                                                                file_name,
+                                                                                file_size: m.file_size,
+                                                                                source_base_url,
+                                                                                source_user,
+                                                                                source_pass,
+                                                                            }),
+                                                                            m.movie.num.clone().unwrap_or_default(),
+                                                                        )
+                                                                    } else {
+                                                                        (None, String::new())
+                                                                    }
+                                                                };
+
+                                                                if let Some(req) = req_opt {
+                                                                    match kr::sync::enqueue_webdav_download(base_url, &req) {
+                                                                        Ok(()) => println!("Queued on KS: {}", movie_num),
+                                                                        Err(e) => eprintln!("Failed to queue on KS: {}", e),
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                eprintln!("KS base_url not configured. Set ks.base_url in config.toml first.");
+                                                            }
                                                         }
                                                     }
 
@@ -351,7 +400,7 @@ fn main() {
 
                                                     let actors = db.borrow().get_actors(item_index as usize);
 
-                    
+
 
                                                     // Step 1: Show main context menu with static labels
 
@@ -365,7 +414,7 @@ fn main() {
 
                                                     };
 
-                    
+
 
                                                     if let Some(val) = main_items.popup(x, y) {
 
@@ -449,7 +498,7 @@ fn main() {
 
                                                 }
 
-                                                
+
 
                                             }
 
@@ -667,14 +716,23 @@ fn main() {
                 let stream_path = if is_webdav {
                     let wd_ref = wd_db.borrow();
                     let base_url = if !wd_ref.config.base_url.is_empty() {
-                         wd_ref.config.base_url.clone()
+                        wd_ref.config.base_url.clone()
                     } else {
-                         dirs::WEBDAV_URL.clone().expect("WebDAV URL not configured")
+                        dirs::WEBDAV_URL.clone().expect("WebDAV URL not configured")
                     };
-                    let user = wd_ref.config.user.clone().or_else(|| dirs::WEBDAV_USER.clone());
-                    let pass = wd_ref.config.pass.clone().or_else(|| dirs::WEBDAV_PASS.clone());
-                    
-                    let client = kwa::WebDavClient::new(&base_url, user.zip(pass)).expect("Failed to create WebDAV client");
+                    let user = wd_ref
+                        .config
+                        .user
+                        .clone()
+                        .or_else(|| dirs::WEBDAV_USER.clone());
+                    let pass = wd_ref
+                        .config
+                        .pass
+                        .clone()
+                        .or_else(|| dirs::WEBDAV_PASS.clone());
+
+                    let client = kwa::WebDavClient::new(&base_url, user.zip(pass))
+                        .expect("Failed to create WebDAV client");
                     client.get_stream_url(&p).expect("Failed to get stream URL")
                 } else {
                     p
@@ -704,7 +762,7 @@ fn main() {
                 if let Some(idx) = current_movie_index.get() {
                     let is_webdav = matches!(menu.current_mode(), MenuMode::WebDav);
                     if is_webdav {
-                         // TODO: implement markers for webdav if needed
+                        // TODO: implement markers for webdav if needed
                     } else {
                         let added = db.borrow_mut().add_marker(idx, time);
                         db.borrow().flush();
@@ -864,10 +922,7 @@ fn query_menu_items(
             })
             .collect();
         items.sort_by(|(_, a), (_, b)| b.added_time.cmp(&a.added_time));
-        return items
-            .into_iter()
-            .map(|(i, m)| (i, m).into())
-            .collect();
+        return items.into_iter().map(|(i, m)| (i, m).into()).collect();
     }
 
     let db_ref = db.borrow_mut();
@@ -899,7 +954,12 @@ fn query_menu_items(
     }
 }
 
-fn draw_menu_with_mode(mut menu: BrowseMenu, db: Rc<RefCell<kr::db::SimpleJsonDatabase>>, wd_db: Rc<RefCell<kr::db::WebDavDatabase>>, mode: MenuMode) {
+fn draw_menu_with_mode(
+    mut menu: BrowseMenu,
+    db: Rc<RefCell<kr::db::SimpleJsonDatabase>>,
+    wd_db: Rc<RefCell<kr::db::WebDavDatabase>>,
+    mode: MenuMode,
+) {
     menu.set_mode(mode.clone());
     let items = query_menu_items(&db, &wd_db, &mode);
 

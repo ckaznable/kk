@@ -19,10 +19,13 @@ pub static SEARCH_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
 });
 
 pub static WEBDAV_URL: LazyLock<Option<String>> = LazyLock::new(|| env::var("KK_WEBDAV_URL").ok());
-pub static WEBDAV_USER: LazyLock<Option<String>> = LazyLock::new(|| env::var("KK_WEBDAV_USER").ok());
-pub static WEBDAV_PASS: LazyLock<Option<String>> = LazyLock::new(|| env::var("KK_WEBDAV_PASS").ok());
+pub static WEBDAV_USER: LazyLock<Option<String>> =
+    LazyLock::new(|| env::var("KK_WEBDAV_USER").ok());
+pub static WEBDAV_PASS: LazyLock<Option<String>> =
+    LazyLock::new(|| env::var("KK_WEBDAV_PASS").ok());
 
-pub static JAVDB_COOKIE: LazyLock<Option<String>> = LazyLock::new(|| env::var("KK_JAVDB_COOKIE").ok());
+pub static JAVDB_COOKIE: LazyLock<Option<String>> =
+    LazyLock::new(|| env::var("KK_JAVDB_COOKIE").ok());
 
 // ── config.toml ──────────────────────────────────────────────────────────────
 
@@ -34,6 +37,8 @@ pub struct AppConfig {
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct KsConfig {
     pub base_url: Option<String>,
+    pub download_max_total_bytes: Option<u64>,
+    pub download_cache_dir: Option<String>,
 }
 
 /// Path to config.toml: `<config_local_dir>/config.toml`
@@ -61,4 +66,17 @@ pub fn ks_base_url() -> Option<String> {
         .ks
         .and_then(|ks| ks.base_url)
         .filter(|u| !u.is_empty())
+}
+
+/// Convenience: return max bytes allowed for ks cached WebDAV downloads.
+pub fn ks_download_max_total_bytes() -> Option<u64> {
+    load_config().ks.and_then(|ks| ks.download_max_total_bytes)
+}
+
+/// Convenience: return ks cached-download directory override.
+pub fn ks_download_cache_dir() -> Option<PathBuf> {
+    load_config()
+        .ks
+        .and_then(|ks| ks.download_cache_dir)
+        .map(PathBuf::from)
 }

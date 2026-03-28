@@ -1,17 +1,20 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
-    extract::{DefaultBodyLimit, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::{get, post},
     Json, Router,
+    body::Body,
+    extract::{DefaultBodyLimit, Path, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::Mutex as AsyncMutex;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 
@@ -21,6 +24,7 @@ use tracing::{error, info, warn};
 struct AppState {
     data_dir: PathBuf,
     cache: Arc<Mutex<kl::server::KkCache>>,
+    downloads: DownloadManager,
 }
 
 impl AppState {
@@ -79,6 +83,425 @@ async fn is_suspiciously_small(path: &PathBuf, incoming_len: usize) -> bool {
     false
 }
 
+// ── Download queue types ─────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct DownloadQueueFile {
+    pending: Vec<QueuedDownload>,
+    ready: Vec<ReadyDownload>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PendingStatus {
+    Queued,
+    Downloading,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct QueuedDownload {
+    id: String,
+    url_path: String,
+    file_name: String,
+    file_size: Option<u64>,
+    source_base_url: String,
+    source_user: Option<String>,
+    source_pass: Option<String>,
+    status: PendingStatus,
+    enqueued_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ReadyDownload {
+    id: String,
+    url_path: String,
+    file_name: String,
+    stored_name: String,
+    size_bytes: u64,
+    finished_at: u64,
+}
+
+#[derive(Serialize)]
+struct PendingDownloadView {
+    id: String,
+    url_path: String,
+    file_name: String,
+    file_size: Option<u64>,
+    status: PendingStatus,
+    enqueued_at: u64,
+}
+
+#[derive(Serialize)]
+struct DownloadQueueView {
+    pending: Vec<PendingDownloadView>,
+    ready_count: usize,
+    cache_bytes: u64,
+    max_cache_bytes: u64,
+}
+
+#[derive(Clone)]
+struct DownloadManager {
+    state: Arc<AsyncMutex<DownloadQueueFile>>,
+    queue_path: PathBuf,
+    cache_dir: PathBuf,
+    max_total_bytes: u64,
+}
+
+impl DownloadManager {
+    async fn load(queue_path: PathBuf, cache_dir: PathBuf, max_total_bytes: u64) -> Result<Self> {
+        if let Some(parent) = queue_path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        tokio::fs::create_dir_all(&cache_dir).await.ok();
+
+        let mut queue: DownloadQueueFile = match tokio::fs::read_to_string(&queue_path).await {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => DownloadQueueFile::default(),
+        };
+
+        // If ks restarted while a task was downloading, make it queueable again.
+        for item in &mut queue.pending {
+            if item.status == PendingStatus::Downloading {
+                item.status = PendingStatus::Queued;
+            }
+        }
+
+        let manager = Self {
+            state: Arc::new(AsyncMutex::new(queue.clone())),
+            queue_path,
+            cache_dir,
+            max_total_bytes,
+        };
+
+        manager.persist_snapshot(&queue).await?;
+        Ok(manager)
+    }
+
+    async fn persist_snapshot(&self, snapshot: &DownloadQueueFile) -> Result<()> {
+        if let Some(parent) = self.queue_path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        let body = serde_json::to_string_pretty(snapshot)?;
+        tokio::fs::write(&self.queue_path, body).await?;
+        Ok(())
+    }
+
+    async fn enqueue(&self, req: kr::sync::KsWebDavEnqueueRequest) -> Result<(String, bool)> {
+        let source_base_url = req
+            .source_base_url
+            .or_else(|| dirs::WEBDAV_URL.clone())
+            .filter(|s| !s.is_empty())
+            .context("Missing WebDAV source base URL for queued download")?;
+
+        let file_name = req
+            .file_name
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                FsPath::new(&req.url_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| "download.bin".to_string());
+        let source_user = req.source_user.or_else(|| dirs::WEBDAV_USER.clone());
+        let source_pass = req.source_pass.or_else(|| dirs::WEBDAV_PASS.clone());
+
+        let mut state = self.state.lock().await;
+
+        if let Some(existing) = state.pending.iter().find(|d| d.url_path == req.url_path) {
+            return Ok((existing.id.clone(), false));
+        }
+
+        if let Some(existing) = state.ready.iter().find(|d| d.url_path == req.url_path) {
+            return Ok((existing.id.clone(), false));
+        }
+
+        let now = now_ts();
+        let id = format!("{}-{}", now, state.pending.len() + state.ready.len() + 1);
+        state.pending.push(QueuedDownload {
+            id: id.clone(),
+            url_path: req.url_path,
+            file_name,
+            file_size: req.file_size,
+            source_base_url,
+            source_user,
+            source_pass,
+            status: PendingStatus::Queued,
+            enqueued_at: now,
+        });
+
+        let snapshot = state.clone();
+        drop(state);
+        self.persist_snapshot(&snapshot).await?;
+
+        Ok((id, true))
+    }
+
+    async fn pop_next_queued_mark_downloading(&self) -> Result<Option<QueuedDownload>> {
+        let mut state = self.state.lock().await;
+        let idx = match state
+            .pending
+            .iter()
+            .position(|d| d.status == PendingStatus::Queued)
+        {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+
+        state.pending[idx].status = PendingStatus::Downloading;
+        let item = state.pending[idx].clone();
+
+        let snapshot = state.clone();
+        drop(state);
+        self.persist_snapshot(&snapshot).await?;
+
+        Ok(Some(item))
+    }
+
+    async fn set_queued(&self, id: &str) -> Result<()> {
+        let mut state = self.state.lock().await;
+        if let Some(item) = state.pending.iter_mut().find(|d| d.id == id) {
+            item.status = PendingStatus::Queued;
+            let snapshot = state.clone();
+            drop(state);
+            self.persist_snapshot(&snapshot).await?;
+        }
+        Ok(())
+    }
+
+    async fn mark_ready(&self, id: &str, stored_name: String, size_bytes: u64) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let Some(pos) = state.pending.iter().position(|d| d.id == id) else {
+            return Ok(());
+        };
+
+        let queued = state.pending.remove(pos);
+        state.ready.push(ReadyDownload {
+            id: queued.id,
+            url_path: queued.url_path,
+            file_name: queued.file_name,
+            stored_name,
+            size_bytes,
+            finished_at: now_ts(),
+        });
+
+        let snapshot = state.clone();
+        drop(state);
+        self.persist_snapshot(&snapshot).await?;
+
+        Ok(())
+    }
+
+    async fn ready_list(&self) -> Vec<kr::sync::KsReadyDownload> {
+        let state = self.state.lock().await;
+        state
+            .ready
+            .iter()
+            .map(|r| kr::sync::KsReadyDownload {
+                id: r.id.clone(),
+                url_path: r.url_path.clone(),
+                file_name: r.file_name.clone(),
+                size_bytes: r.size_bytes,
+            })
+            .collect()
+    }
+
+    async fn ready_file_info(&self, id: &str) -> Option<(PathBuf, String)> {
+        let state = self.state.lock().await;
+        state
+            .ready
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| (self.cache_dir.join(&r.stored_name), r.file_name.clone()))
+    }
+
+    async fn delete_ready(&self, id: &str) -> Result<bool> {
+        let mut state = self.state.lock().await;
+        let Some(pos) = state.ready.iter().position(|r| r.id == id) else {
+            return Ok(false);
+        };
+
+        let ready = state.ready.remove(pos);
+        let snapshot = state.clone();
+        drop(state);
+
+        self.persist_snapshot(&snapshot).await?;
+
+        let f = self.cache_dir.join(ready.stored_name);
+        if let Err(e) = tokio::fs::remove_file(&f).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(error = %e, path = %f.display(), "Failed to remove cached file");
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn queue_view(&self) -> DownloadQueueView {
+        let state = self.state.lock().await;
+        let pending = state
+            .pending
+            .iter()
+            .map(|d| PendingDownloadView {
+                id: d.id.clone(),
+                url_path: d.url_path.clone(),
+                file_name: d.file_name.clone(),
+                file_size: d.file_size,
+                status: d.status.clone(),
+                enqueued_at: d.enqueued_at,
+            })
+            .collect::<Vec<_>>();
+        let ready_count = state.ready.len();
+        drop(state);
+
+        DownloadQueueView {
+            pending,
+            ready_count,
+            cache_bytes: self.total_cache_size().await,
+            max_cache_bytes: self.max_total_bytes,
+        }
+    }
+
+    async fn total_cache_size(&self) -> u64 {
+        let dir = self.cache_dir.clone();
+        tokio::task::spawn_blocking(move || dir_size_bytes(&dir))
+            .await
+            .unwrap_or(0)
+    }
+}
+
+fn now_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs()
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        let bad = matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|');
+        if bad {
+            out.push('_');
+        } else {
+            out.push(ch);
+        }
+    }
+    if out.is_empty() {
+        "download.bin".to_string()
+    } else {
+        out
+    }
+}
+
+fn dir_size_bytes(path: &FsPath) -> u64 {
+    let mut total = 0u64;
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return 0;
+    };
+
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if let Ok(meta) = ent.metadata() {
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            } else if meta.is_dir() {
+                total = total.saturating_add(dir_size_bytes(&p));
+            }
+        }
+    }
+
+    total
+}
+
+async fn download_worker_loop(manager: DownloadManager) {
+    loop {
+        let next = match manager.pop_next_queued_mark_downloading().await {
+            Ok(Some(task)) => task,
+            Ok(None) => {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            Err(e) => {
+                error!(error = %e, "Queue pop failed");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let current_bytes = manager.total_cache_size().await;
+        if current_bytes >= manager.max_total_bytes {
+            info!(
+                id = %next.id,
+                cache_bytes = current_bytes,
+                max_bytes = manager.max_total_bytes,
+                "Download queue paused: cache size already reached limit"
+            );
+            if let Err(e) = manager.set_queued(&next.id).await {
+                error!(error = %e, id = %next.id, "Failed to reset queued status");
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        if let Some(task_size) = next.file_size {
+            if current_bytes.saturating_add(task_size) > manager.max_total_bytes {
+                info!(
+                    id = %next.id,
+                    cache_bytes = current_bytes,
+                    task_bytes = task_size,
+                    max_bytes = manager.max_total_bytes,
+                    "Download queue paused: adding this file would exceed limit"
+                );
+                if let Err(e) = manager.set_queued(&next.id).await {
+                    error!(error = %e, id = %next.id, "Failed to reset queued status");
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        }
+
+        let client = match kwa::WebDavClient::new(
+            &next.source_base_url,
+            next.source_user.clone().zip(next.source_pass.clone()),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = %e, id = %next.id, "Failed to create WebDAV client");
+                if let Err(e) = manager.set_queued(&next.id).await {
+                    error!(error = %e, id = %next.id, "Failed to reset queued status");
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        let stored_name = format!("{}__{}", next.id, sanitize_filename(&next.file_name));
+        let dest = manager.cache_dir.join(&stored_name);
+
+        info!(id = %next.id, path = %next.url_path, "Starting WebDAV background download");
+        match client.download(&next.url_path, &dest).await {
+            Ok(()) => {
+                let size = tokio::fs::metadata(&dest)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if let Err(e) = manager.mark_ready(&next.id, stored_name, size).await {
+                    error!(error = %e, id = %next.id, "Failed to mark task as ready");
+                } else {
+                    info!(id = %next.id, bytes = size, "WebDAV download completed");
+                }
+            }
+            Err(e) => {
+                error!(error = %e, id = %next.id, path = %next.url_path, "WebDAV download failed");
+                if let Err(e) = manager.set_queued(&next.id).await {
+                    error!(error = %e, id = %next.id, "Failed to reset queued status");
+                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        }
+    }
+}
+
 // ── Handlers: kr.json ────────────────────────────────────────────────────────
 
 async fn get_kr(State(state): State<AppState>) -> Response {
@@ -86,13 +509,13 @@ async fn get_kr(State(state): State<AppState>) -> Response {
     match tokio::fs::read_to_string(&path).await {
         Ok(content) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            [(header::CONTENT_TYPE, "application/json")],
             content,
         )
             .into_response(),
         Err(_) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            [(header::CONTENT_TYPE, "application/json")],
             "{}".to_string(),
         )
             .into_response(),
@@ -109,7 +532,10 @@ async fn put_kr(State(state): State<AppState>, body: String) -> Response {
 
     // Size guard: reject if incoming payload is < 90 % of the cached file
     if is_suspiciously_small(&path, body.len()).await {
-        let current = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+        let current = tokio::fs::metadata(&path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
         warn!(
             incoming_bytes = body.len(),
             current_bytes = current,
@@ -145,13 +571,13 @@ async fn get_kwa(State(state): State<AppState>) -> Response {
     match tokio::fs::read_to_string(&path).await {
         Ok(content) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            [(header::CONTENT_TYPE, "application/json")],
             content,
         )
             .into_response(),
         Err(_) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            [(header::CONTENT_TYPE, "application/json")],
             "{}".to_string(),
         )
             .into_response(),
@@ -167,7 +593,10 @@ async fn put_kwa(State(state): State<AppState>, body: String) -> Response {
 
     // Size guard: reject if incoming payload is < 90 % of the cached file
     if is_suspiciously_small(&path, body.len()).await {
-        let current = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+        let current = tokio::fs::metadata(&path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
         warn!(
             incoming_bytes = body.len(),
             current_bytes = current,
@@ -193,6 +622,85 @@ async fn put_kwa(State(state): State<AppState>, body: String) -> Response {
             error!(error = %e, file = "kwa_db.json", "Failed to write database");
             err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         }
+    }
+}
+
+// ── Handlers: WebDAV downloads ───────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct EnqueueResp {
+    ok: bool,
+    id: String,
+    queued: bool,
+}
+
+async fn post_download_webdav(
+    State(state): State<AppState>,
+    Json(req): Json<kr::sync::KsWebDavEnqueueRequest>,
+) -> Response {
+    match state.downloads.enqueue(req).await {
+        Ok((id, queued)) => (
+            StatusCode::OK,
+            Json(EnqueueResp {
+                ok: true,
+                id,
+                queued,
+            }),
+        )
+            .into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+async fn get_download_webdav(State(state): State<AppState>) -> Response {
+    let view = state.downloads.queue_view().await;
+    (StatusCode::OK, Json(view)).into_response()
+}
+
+async fn get_download_webdav_ready(State(state): State<AppState>) -> Response {
+    let ready = state.downloads.ready_list().await;
+    (StatusCode::OK, Json(ready)).into_response()
+}
+
+async fn get_download_webdav_ready_file(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Response {
+    let Some((path, file_name)) = state.downloads.ready_file_info(&id).await else {
+        return err_json(StatusCode::NOT_FOUND, "Ready download not found");
+    };
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let mut resp = Response::new(Body::from(bytes));
+            *resp.status_mut() = StatusCode::OK;
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/octet-stream"),
+            );
+            if let Ok(v) = header::HeaderValue::from_str(&format!(
+                "attachment; filename=\"{}\"",
+                file_name.replace('"', "_")
+            )) {
+                resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+            }
+            resp
+        }
+        Err(e) => {
+            error!(error = %e, path = %path.display(), "Failed to read ready file");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    }
+}
+
+async fn delete_download_webdav_ready(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Response {
+    match state.downloads.delete_ready(&id).await {
+        Ok(true) => ok_json(),
+        Ok(false) => err_json(StatusCode::NOT_FOUND, "Ready download not found"),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -254,7 +762,11 @@ fn parse_cache_request(req: &kl::server::CacheRequest) -> Result<kr::Movie> {
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 #[derive(clap::Parser)]
-#[command(author, version, about = "KS – central sync server for kk/kl JSON databases")]
+#[command(
+    author,
+    version,
+    about = "KS – central sync server for kk/kl JSON databases"
+)]
 struct Cli {
     /// Port to listen on
     #[arg(short, long, default_value = "7070")]
@@ -285,9 +797,29 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&data_dir).ok();
 
+    // Persist pending list in the same directory as config.toml
+    let queue_path = dirs::DIR.config_local_dir().join("ks_webdav_pending.json");
+    let cache_dir =
+        dirs::ks_download_cache_dir().unwrap_or_else(|| data_dir.join("ks_webdav_cache"));
+    let max_total_bytes = dirs::ks_download_max_total_bytes().unwrap_or(200 * 1024 * 1024 * 1024); // 200 GiB
+
+    let downloads = DownloadManager::load(queue_path.clone(), cache_dir.clone(), max_total_bytes)
+        .await
+        .with_context(|| "Failed to initialize download manager")?;
+
+    info!(
+        queue_path = %queue_path.display(),
+        cache_dir = %cache_dir.display(),
+        max_total_bytes,
+        "Initialized WebDAV background download queue"
+    );
+
+    tokio::spawn(download_worker_loop(downloads.clone()));
+
     let state = AppState {
         data_dir,
         cache: Arc::new(Mutex::new(kl::server::KkCache::load())),
+        downloads,
     };
 
     const MAX_BODY: usize = 20 * 1024 * 1024; // 20 MB
@@ -296,6 +828,19 @@ async fn main() -> Result<()> {
         .route("/db/kr", get(get_kr).put(put_kr))
         .route("/db/kwa", get(get_kwa).put(put_kwa))
         .route("/cache", post(handle_cache))
+        .route(
+            "/downloads/webdav",
+            get(get_download_webdav).post(post_download_webdav),
+        )
+        .route("/downloads/webdav/ready", get(get_download_webdav_ready))
+        .route(
+            "/downloads/webdav/ready/{id}/file",
+            get(get_download_webdav_ready_file),
+        )
+        .route(
+            "/downloads/webdav/ready/{id}",
+            delete(delete_download_webdav_ready),
+        )
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(CorsLayer::permissive());

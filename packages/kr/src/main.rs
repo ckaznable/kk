@@ -81,7 +81,12 @@ fn cache() -> Result<()> {
         .clone()
         .iter()
         .enumerate()
-        .filter_map(|(i, movie)| Some((i, movie.abs_path().parent()?.join(movie.movie.thumb.clone()?))))
+        .filter_map(|(i, movie)| {
+            Some((
+                i,
+                movie.abs_path().parent()?.join(movie.movie.thumb.clone()?),
+            ))
+        })
         .for_each(|(i, path)| {
             let Some(ext) = path.extension() else {
                 println!("{:?} ext name not found", path);
@@ -133,7 +138,10 @@ fn dup_num() -> Result<()> {
             }
         }
 
-        num_map.entry(stem_lower).or_default().push(abs_path.to_string_lossy().to_string());
+        num_map
+            .entry(stem_lower)
+            .or_default()
+            .push(abs_path.to_string_lossy().to_string());
     }
 
     let mut dup_count = 0;
@@ -195,7 +203,10 @@ fn fix_thumb() -> Result<()> {
 
         // Update only if the cache file already exists
         if cache_path.exists() {
-            println!("Updating thumb for {:?}: {} -> {}", abs_path, thumb, cache_filename);
+            println!(
+                "Updating thumb for {:?}: {} -> {}",
+                abs_path, thumb, cache_filename
+            );
             movie.movie.thumb = Some(cache_filename);
             updated_count += 1;
         }
@@ -203,7 +214,10 @@ fn fix_thumb() -> Result<()> {
 
     if updated_count > 0 {
         db.flush();
-        println!("Updated {} thumbnail path(s). Database saved.", updated_count);
+        println!(
+            "Updated {} thumbnail path(s). Database saved.",
+            updated_count
+        );
     } else {
         println!("No thumbnail paths needed updating.");
     }
@@ -212,11 +226,9 @@ fn fix_thumb() -> Result<()> {
 }
 
 fn push(url: Option<String>) -> Result<()> {
-    let base_url = url
-        .or_else(dirs::ks_base_url)
-        .ok_or_else(|| anyhow::anyhow!(
-            "No ks base URL provided. Pass --url or set ks.base_url in config.toml"
-        ))?;
+    let base_url = url.or_else(dirs::ks_base_url).ok_or_else(|| {
+        anyhow::anyhow!("No ks base URL provided. Pass --url or set ks.base_url in config.toml")
+    })?;
 
     kr::sync::push_kr(&base_url)?;
     kr::sync::push_kwa(&base_url)?;

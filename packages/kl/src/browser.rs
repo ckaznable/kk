@@ -1,6 +1,6 @@
+use anyhow::{anyhow, Result};
+use kr::{Actor, Movie};
 use playwright::Playwright;
-use anyhow::{Result, anyhow};
-use kr::{Movie, Actor};
 
 pub struct BrowserScraper {
     playwright: Playwright,
@@ -16,7 +16,7 @@ impl BrowserScraper {
         println!("Initializing Playwright...");
         let playwright = Playwright::initialize().await?;
         println!("Preparing browsers...");
-        playwright.prepare()?; 
+        playwright.prepare()?;
         println!("Playwright ready.");
         Ok(Self { playwright })
     }
@@ -40,13 +40,19 @@ impl BrowserScraper {
         tokio::task::spawn_blocking(|| {
             let mut input = String::new();
             let _ = std::io::stdin().read_line(&mut input);
-        }).await?;
+        })
+        .await?;
 
         Ok(BrowserSession { browser, page })
     }
 
     /// Automated scrape using an existing session
-    pub async fn scrape_session(&self, session: &BrowserSession, number: &str, is_javdb: bool) -> Result<Movie> {
+    pub async fn scrape_session(
+        &self,
+        session: &BrowserSession,
+        number: &str,
+        is_javdb: bool,
+    ) -> Result<Movie> {
         let page = &session.page;
 
         if is_javdb {
@@ -57,14 +63,18 @@ impl BrowserScraper {
             self.check_verification(page).await?;
 
             // 2. Auto-click first result
-            let clicked: bool = page.eval(r#"() => {
+            let clicked: bool = page
+                .eval(
+                    r#"() => {
                 const firstLink = document.querySelector('a[href^="/v/"]');
                 if (firstLink) {
                     firstLink.click();
                     return true;
                 }
                 return false;
-            }"#).await?;
+            }"#,
+                )
+                .await?;
 
             if !clicked {
                 return Err(anyhow!("No search results found for {}", number));
@@ -86,14 +96,18 @@ impl BrowserScraper {
     }
 
     pub async fn scrape_with_interaction(&self, number: &str, is_javdb: bool) -> Result<Movie> {
-        let session = self.start_session(if is_javdb { "https://javdb.com/" } else { "" }).await?;
+        let session = self
+            .start_session(if is_javdb { "https://javdb.com/" } else { "" })
+            .await?;
         let movie = self.scrape_session(&session, number, is_javdb).await?;
         session.browser.close().await?;
         Ok(movie)
     }
 
     async fn check_verification(&self, page: &playwright::api::Page) -> Result<()> {
-        let is_verification: bool = page.eval(r#"() => {
+        let is_verification: bool = page
+            .eval(
+                r#"() => {
             const text = document.body.innerText;
             return text.includes('Security Verification') || 
                    text.includes('安全驗證') || 
@@ -101,7 +115,10 @@ impl BrowserScraper {
                    text.includes('Cloudflare') ||
                    document.title.includes('Security Verification') ||
                    document.title.includes('Cloudflare');
-        }"#).await.unwrap_or(false);
+        }"#,
+            )
+            .await
+            .unwrap_or(false);
 
         if is_verification {
             println!("**************************************************");
@@ -113,7 +130,8 @@ impl BrowserScraper {
             tokio::task::spawn_blocking(|| {
                 let mut input = String::new();
                 let _ = std::io::stdin().read_line(&mut input);
-            }).await?;
+            })
+            .await?;
         }
         Ok(())
     }
@@ -123,19 +141,27 @@ impl BrowserScraper {
         let current_url = page.url()?;
         println!("Extracting data from: {}", current_url);
 
-        let title: String = page.eval("() => {
+        let title: String = page
+            .eval(
+                "() => {
             const el = document.querySelector('.current-title') || document.querySelector('title');
             return el ? el.innerText.split(' | JavDB')[0].trim() : 'Unknown Title';
-        }").await?;
-        
-        let num: String = page.eval(r#"() => {
+        }",
+            )
+            .await?;
+
+        let num: String = page
+            .eval(
+                r#"() => {
             const blocks = Array.from(document.querySelectorAll('.panel-block'));
             const el = blocks.find(e => e.innerText.includes('番號') || e.innerText.includes('ID'));
             if (!el) return '';
             const val = el.querySelector('.value');
             return val ? val.innerText.trim() : '';
-        }"#).await?;
-        
+        }"#,
+            )
+            .await?;
+
         let poster: Option<String> = page.eval(r#"() => {
             const img = document.querySelector('.column-video-cover img') || document.querySelector('.video-cover');
             return img ? img.src : null;
@@ -164,13 +190,16 @@ impl BrowserScraper {
             const links = Array.from(el.querySelectorAll('a'));
             return JSON.stringify(links.map(a => ({ name: a.innerText.trim() })));
         }"#).await?;
-        
+
         let actors_raw: Vec<serde_json::Value> = serde_json::from_str(&actors_json)?;
-        let actors = actors_raw.into_iter().map(|v| Actor {
-            name: v["name"].as_str().unwrap_or_default().to_string(),
-            role: None,
-            thumb: None,
-        }).collect();
+        let actors = actors_raw
+            .into_iter()
+            .map(|v| Actor {
+                name: v["name"].as_str().unwrap_or_default().to_string(),
+                role: None,
+                thumb: None,
+            })
+            .collect();
 
         let tags_json: String = page.eval(r#"() => {
             const blocks = Array.from(document.querySelectorAll('.panel-block'));

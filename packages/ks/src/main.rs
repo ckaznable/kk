@@ -155,6 +155,14 @@ struct DownloadQueueView {
     max_cache_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct DownloadCounts {
+    pending_total: usize,
+    queued: usize,
+    downloading: usize,
+    ready: usize,
+}
+
 #[derive(Clone)]
 struct DownloadManager {
     state: Arc<AsyncMutex<DownloadQueueFile>>,
@@ -429,6 +437,27 @@ impl DownloadManager {
         }
     }
 
+    async fn counts(&self) -> DownloadCounts {
+        let state = self.state.lock().await;
+        let queued = state
+            .pending
+            .iter()
+            .filter(|d| d.status == PendingStatus::Queued)
+            .count();
+        let downloading = state
+            .pending
+            .iter()
+            .filter(|d| d.status == PendingStatus::Downloading)
+            .count();
+
+        DownloadCounts {
+            pending_total: state.pending.len(),
+            queued,
+            downloading,
+            ready: state.ready.len(),
+        }
+    }
+
     async fn total_cache_size(&self) -> u64 {
         let dir = self.download_dir.clone();
         tokio::task::spawn_blocking(move || dir_size_bytes(&dir))
@@ -550,6 +579,19 @@ struct WebDavClientKey {
     base_url: String,
     source_user: Option<String>,
     source_pass: Option<String>,
+}
+
+async fn send_ks_notification(
+    body: String,
+    success_message: &'static str,
+    failure_message: &'static str,
+) {
+    let http = reqwest::Client::new();
+    if let Err(e) = http.post(KK_NOTIFY_URL).body(body).send().await {
+        warn!(error = %e, url = KK_NOTIFY_URL, "{failure_message}");
+    } else {
+        info!(url = KK_NOTIFY_URL, "{success_message}");
+    }
 }
 
 async fn download_worker_loop(manager: DownloadManager) {
@@ -751,14 +793,32 @@ async fn download_worker_loop(manager: DownloadManager) {
             if let Err(e) = manager.mark_ready(&next.id, dest.clone(), size).await {
                 error!(error = %e, id = %next.id, "Failed to mark task as ready");
             } else {
+                let counts = manager.counts().await;
                 info!(
                     id = %next.id,
                     path = %remote_path,
                     remote_url = %build_webdav_attempt_url(&next.source_base_url, &remote_path),
                     dest = %dest.display(),
                     bytes = size,
+                    remaining_pending = counts.pending_total,
+                    remaining_queued = counts.queued,
+                    remaining_downloading = counts.downloading,
+                    ready_count = counts.ready,
                     "WebDAV download completed"
                 );
+
+                if counts.pending_total == 0 {
+                    let notify_body = format!(
+                        "[ks] Download queue completed\nLast file: {}\nPath: {}\nBytes: {}\nReady files: {}",
+                        next.file_name, remote_path, size, counts.ready
+                    );
+                    send_ks_notification(
+                        notify_body,
+                        "Completion notification sent",
+                        "Failed to send completion notification",
+                    )
+                    .await;
+                }
             }
         } else {
             let err = last_error.unwrap_or_else(|| "unknown error".to_string());
@@ -791,17 +851,12 @@ async fn download_worker_loop(manager: DownloadManager) {
                         "[ks] Download failed after {} retries\nID: {}\nPath: {}\nFile: {}\nError: {}",
                         count, next.id, next.url_path, next.file_name, err
                     );
-                    let http = reqwest::Client::new();
-                    if let Err(e) = http
-                        .post(KK_NOTIFY_URL)
-                        .body(notify_body.clone())
-                        .send()
-                        .await
-                    {
-                        warn!(error = %e, url = KK_NOTIFY_URL, "Failed to send failure notification");
-                    } else {
-                        info!(url = KK_NOTIFY_URL, "Failure notification sent");
-                    }
+                    send_ks_notification(
+                        notify_body,
+                        "Failure notification sent",
+                        "Failed to send failure notification",
+                    )
+                    .await;
                 }
                 Ok(count) => {
                     warn!(

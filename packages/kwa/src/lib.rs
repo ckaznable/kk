@@ -160,6 +160,18 @@ impl WebDavClient {
     /// Download a remote WebDAV file at `path` to the local `dest` path.
     /// Progress is reported as bytes written to stdout.
     pub async fn download(&self, path: &str, dest: &Path) -> Result<()> {
+        self.download_with_progress(path, dest, |_, _| {}).await
+    }
+
+    pub async fn download_with_progress<F>(
+        &self,
+        path: &str,
+        dest: &Path,
+        mut on_progress: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u64, Option<u64>),
+    {
         use tokio::io::{AsyncWriteExt, BufWriter};
 
         let url = self.base_url.join(path)?;
@@ -168,6 +180,8 @@ impl WebDavClient {
         if !resp.status().is_success() {
             return Err(anyhow!("HTTP {} when downloading {}", resp.status(), path));
         }
+
+        let total_bytes = resp.content_length();
 
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
@@ -180,13 +194,27 @@ impl WebDavClient {
         let mut writer = BufWriter::with_capacity(BUF_SIZE, file);
         let mut stream = resp.bytes_stream();
         let mut total: u64 = 0;
+        let mut next_progress_pct: u64 = 5;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             total += chunk.len() as u64;
             writer.write_all(&chunk).await?;
+
+            if let Some(total_bytes) = total_bytes {
+                while next_progress_pct <= 100
+                    && total.saturating_mul(100) >= total_bytes.saturating_mul(next_progress_pct)
+                {
+                    on_progress(total, Some(total_bytes));
+                    next_progress_pct += 5;
+                }
+            }
         }
         writer.flush().await?;
+
+        if total_bytes.is_none() {
+            on_progress(total, None);
+        }
 
         println!("Downloaded {} bytes -> {:?}", total, dest);
         Ok(())

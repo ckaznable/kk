@@ -736,6 +736,7 @@ async fn download_worker_loop(manager: DownloadManager) {
         let mut last_error: Option<String> = None;
         for (attempt_idx, path) in candidate_paths.iter().enumerate() {
             let remote_url = build_webdav_attempt_url(&next.source_base_url, path);
+            let started_at = Instant::now();
             info!(
                 id = %next.id,
                 attempt = attempt_idx + 1,
@@ -747,7 +748,46 @@ async fn download_worker_loop(manager: DownloadManager) {
                 "Attempting WebDAV download candidate"
             );
 
-            match client.download(path, &dest).await {
+            match client
+                .download_with_progress(path, &dest, |written_bytes, total_bytes| {
+                    let elapsed_secs = started_at.elapsed().as_secs_f64().max(0.001);
+                    let avg_mib_per_sec =
+                        written_bytes as f64 / (1024.0 * 1024.0) / elapsed_secs;
+
+                    if let Some(total_bytes) = total_bytes {
+                        let progress_pct =
+                            ((written_bytes.saturating_mul(100)) / total_bytes.max(1)).min(100);
+                        info!(
+                            id = %next.id,
+                            attempt = attempt_idx + 1,
+                            total_attempts = candidate_paths.len(),
+                            path = %path,
+                            remote_url = %remote_url,
+                            dest = %dest.display(),
+                            progress_pct,
+                            downloaded_bytes = written_bytes,
+                            total_bytes,
+                            elapsed_secs = format!("{elapsed_secs:.2}"),
+                            avg_mib_per_sec = format!("{avg_mib_per_sec:.2}"),
+                            "WebDAV download progress"
+                        );
+                    } else {
+                        info!(
+                            id = %next.id,
+                            attempt = attempt_idx + 1,
+                            total_attempts = candidate_paths.len(),
+                            path = %path,
+                            remote_url = %remote_url,
+                            dest = %dest.display(),
+                            downloaded_bytes = written_bytes,
+                            elapsed_secs = format!("{elapsed_secs:.2}"),
+                            avg_mib_per_sec = format!("{avg_mib_per_sec:.2}"),
+                            "WebDAV download progress (unknown total size)"
+                        );
+                    }
+                })
+                .await
+            {
                 Ok(()) => {
                     let size = match tokio::fs::metadata(&dest).await {
                         Ok(m) => m.len(),

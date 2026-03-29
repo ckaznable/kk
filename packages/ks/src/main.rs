@@ -15,7 +15,7 @@ use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(unix)]
@@ -444,6 +444,14 @@ fn now_ts() -> u64 {
         .as_secs()
 }
 
+fn format_mib_per_sec(bytes: u64, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if secs <= f64::EPSILON {
+        return "n/a".to_string();
+    }
+    format!("{:.2}", bytes as f64 / (1024.0 * 1024.0) / secs)
+}
+
 fn sanitize_filename(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
@@ -504,6 +512,13 @@ fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> V
     }
 
     out
+}
+
+fn build_webdav_attempt_url(base_url: &str, path: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .and_then(|url| url.join(path))
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| format!("{} :: {}", base_url, path))
 }
 
 fn dir_size_bytes(path: &FsPath) -> u64 {
@@ -627,13 +642,30 @@ async fn download_worker_loop(manager: DownloadManager) {
         info!(
             id = %next.id,
             path = %next.url_path,
+            file_name = %next.file_name,
+            dest = %dest.display(),
+            source_base_url = %next.source_base_url,
+            source_prefixes = ?manager.source_prefixes,
+            candidate_count = candidate_paths.len(),
             candidates = ?candidate_paths,
             "Starting WebDAV background download"
         );
 
         let mut downloaded: Option<(String, u64)> = None;
         let mut last_error: Option<String> = None;
-        for path in &candidate_paths {
+        for (attempt_idx, path) in candidate_paths.iter().enumerate() {
+            let remote_url = build_webdav_attempt_url(&next.source_base_url, path);
+            info!(
+                id = %next.id,
+                attempt = attempt_idx + 1,
+                total_attempts = candidate_paths.len(),
+                original_path = %next.url_path,
+                candidate_path = %path,
+                remote_url = %remote_url,
+                dest = %dest.display(),
+                "Attempting WebDAV download candidate"
+            );
+
             match client.download(path, &dest).await {
                 Ok(()) => {
                     let size = match tokio::fs::metadata(&dest).await {
@@ -642,7 +674,11 @@ async fn download_worker_loop(manager: DownloadManager) {
                             warn!(
                                 error = %e,
                                 id = %next.id,
+                                attempt = attempt_idx + 1,
+                                total_attempts = candidate_paths.len(),
                                 path = %path,
+                                remote_url = %remote_url,
+                                dest = %dest.display(),
                                 "Downloaded file metadata check failed"
                             );
                             last_error = Some(format!("metadata check failed: {}", e));
@@ -653,7 +689,11 @@ async fn download_worker_loop(manager: DownloadManager) {
                     if size < MIN_READY_DOWNLOAD_BYTES {
                         warn!(
                             id = %next.id,
+                            attempt = attempt_idx + 1,
+                            total_attempts = candidate_paths.len(),
                             path = %path,
+                            remote_url = %remote_url,
+                            dest = %dest.display(),
                             bytes = size,
                             min_bytes = MIN_READY_DOWNLOAD_BYTES,
                             "WebDAV download rejected: file smaller than minimum size"
@@ -676,10 +716,30 @@ async fn download_worker_loop(manager: DownloadManager) {
                     }
 
                     downloaded = Some((path.clone(), size));
+                    info!(
+                        id = %next.id,
+                        attempt = attempt_idx + 1,
+                        total_attempts = candidate_paths.len(),
+                        path = %path,
+                        remote_url = %remote_url,
+                        dest = %dest.display(),
+                        bytes = size,
+                        "WebDAV download candidate succeeded"
+                    );
                     break;
                 }
                 Err(e) => {
-                    warn!(error = %e, id = %next.id, path = %path, "WebDAV download attempt failed");
+                    warn!(
+                        error = %e,
+                        id = %next.id,
+                        attempt = attempt_idx + 1,
+                        total_attempts = candidate_paths.len(),
+                        original_path = %next.url_path,
+                        path = %path,
+                        remote_url = %remote_url,
+                        dest = %dest.display(),
+                        "WebDAV download attempt failed"
+                    );
                     last_error = Some(e.to_string());
                 }
             }
@@ -692,6 +752,8 @@ async fn download_worker_loop(manager: DownloadManager) {
                 info!(
                     id = %next.id,
                     path = %remote_path,
+                    remote_url = %build_webdav_attempt_url(&next.source_base_url, &remote_path),
+                    dest = %dest.display(),
                     bytes = size,
                     "WebDAV download completed"
                 );
@@ -702,6 +764,9 @@ async fn download_worker_loop(manager: DownloadManager) {
                 id = %next.id,
                 path = %next.url_path,
                 error = %err,
+                dest = %dest.display(),
+                source_base_url = %next.source_base_url,
+                source_prefixes = ?manager.source_prefixes,
                 tried_paths = ?candidate_paths,
                 "WebDAV download failed"
             );
@@ -982,6 +1047,10 @@ async fn get_download_webdav_ready(State(state): State<AppState>) -> Response {
 #[cfg(unix)]
 fn file_stream_with_fadvise(
     file: tokio::fs::File,
+    id: String,
+    file_name: String,
+    path: PathBuf,
+    expected_bytes: Option<u64>,
 ) -> impl futures_util::stream::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send {
     use futures_util::StreamExt;
 
@@ -993,25 +1062,140 @@ fn file_stream_with_fadvise(
     // cache from growing too large, coarse-grained enough to be cheap.
     const FADVISE_INTERVAL: i64 = 32 * 1024 * 1024;
 
-    let mut bytes_read: i64 = 0;
-    let mut last_advised: i64 = 0;
+    let inner = ReaderStream::with_capacity(file, BUF_SIZE);
+    let started_at = Instant::now();
 
-    ReaderStream::with_capacity(file, BUF_SIZE).map(move |result| {
-        if let Ok(ref chunk) = result {
-            bytes_read += chunk.len() as i64;
-            if bytes_read - last_advised >= FADVISE_INTERVAL {
-                let start = last_advised;
-                let len = bytes_read - last_advised;
-                last_advised = bytes_read;
-                // fadvise is a fast hint syscall; run it without awaiting
-                // so the stream is never stalled waiting for it.
-                tokio::task::spawn_blocking(move || unsafe {
-                    libc::posix_fadvise(fd, start, len as libc::off_t, libc::POSIX_FADV_DONTNEED);
-                });
+    futures_util::stream::unfold(
+        (inner, 0i64, 0i64, started_at),
+        move |(mut inner, mut bytes_read, mut last_advised, started_at)| {
+            let id = id.clone();
+            let file_name = file_name.clone();
+            let path = path.clone();
+
+            async move {
+                match inner.next().await {
+                    Some(result) => {
+                        match &result {
+                            Ok(chunk) => {
+                                bytes_read += chunk.len() as i64;
+                                if bytes_read - last_advised >= FADVISE_INTERVAL {
+                                    let start = last_advised;
+                                    let len = bytes_read - last_advised;
+                                    last_advised = bytes_read;
+                                    // fadvise is a fast hint syscall; run it without awaiting
+                                    // so the stream is never stalled waiting for it.
+                                    tokio::task::spawn_blocking(move || unsafe {
+                                        libc::posix_fadvise(
+                                            fd,
+                                            start,
+                                            len as libc::off_t,
+                                            libc::POSIX_FADV_DONTNEED,
+                                        );
+                                    });
+                                }
+                            }
+                            Err(err) => {
+                                let elapsed = started_at.elapsed();
+                                warn!(
+                                    id = %id,
+                                    file_name = %file_name,
+                                    path = %path.display(),
+                                    expected_bytes = expected_bytes.unwrap_or(0),
+                                    streamed_bytes = bytes_read.max(0) as u64,
+                                    elapsed_secs = elapsed.as_secs_f64(),
+                                    avg_mib_per_sec = %format_mib_per_sec(bytes_read.max(0) as u64, elapsed),
+                                    error = %err,
+                                    "Ready file stream failed"
+                                );
+                            }
+                        }
+
+                        Some((result, (inner, bytes_read, last_advised, started_at)))
+                    }
+                    None => {
+                        let streamed_bytes = bytes_read.max(0) as u64;
+                        let elapsed = started_at.elapsed();
+                        info!(
+                            id = %id,
+                            file_name = %file_name,
+                            path = %path.display(),
+                            expected_bytes = expected_bytes.unwrap_or(streamed_bytes),
+                            streamed_bytes,
+                            elapsed_secs = elapsed.as_secs_f64(),
+                            avg_mib_per_sec = %format_mib_per_sec(streamed_bytes, elapsed),
+                            "Completed ready file stream"
+                        );
+                        None
+                    }
+                }
             }
-        }
-        result
-    })
+        },
+    )
+}
+
+#[cfg(not(unix))]
+fn file_stream_plain(
+    file: tokio::fs::File,
+    id: String,
+    file_name: String,
+    path: PathBuf,
+    expected_bytes: Option<u64>,
+) -> impl futures_util::stream::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send {
+    use futures_util::StreamExt;
+
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
+    let inner = ReaderStream::with_capacity(file, BUF_SIZE);
+    let started_at = Instant::now();
+
+    futures_util::stream::unfold(
+        (inner, 0u64, started_at),
+        move |(mut inner, bytes_read, started_at)| {
+            let id = id.clone();
+            let file_name = file_name.clone();
+            let path = path.clone();
+
+            async move {
+                match inner.next().await {
+                    Some(result) => {
+                        let next_bytes_read = match &result {
+                            Ok(chunk) => bytes_read.saturating_add(chunk.len() as u64),
+                            Err(err) => {
+                                let elapsed = started_at.elapsed();
+                                warn!(
+                                    id = %id,
+                                    file_name = %file_name,
+                                    path = %path.display(),
+                                    expected_bytes = expected_bytes.unwrap_or(0),
+                                    streamed_bytes = bytes_read,
+                                    elapsed_secs = elapsed.as_secs_f64(),
+                                    avg_mib_per_sec = %format_mib_per_sec(bytes_read, elapsed),
+                                    error = %err,
+                                    "Ready file stream failed"
+                                );
+                                bytes_read
+                            }
+                        };
+
+                        Some((result, (inner, next_bytes_read, started_at)))
+                    }
+                    None => {
+                        let elapsed = started_at.elapsed();
+                        info!(
+                            id = %id,
+                            file_name = %file_name,
+                            path = %path.display(),
+                            expected_bytes = expected_bytes.unwrap_or(bytes_read),
+                            streamed_bytes = bytes_read,
+                            elapsed_secs = elapsed.as_secs_f64(),
+                            avg_mib_per_sec = %format_mib_per_sec(bytes_read, elapsed),
+                            "Completed ready file stream"
+                        );
+                        None
+                    }
+                }
+            }
+        },
+    )
 }
 
 async fn get_download_webdav_ready_file(
@@ -1036,9 +1220,21 @@ async fn get_download_webdav_ready_file(
             // On Unix, use fadvise(DONTNEED) to prevent page-cache OOM.
             // On other platforms, fall back to plain ReaderStream.
             #[cfg(unix)]
-            let body = Body::from_stream(file_stream_with_fadvise(file));
+            let body = Body::from_stream(file_stream_with_fadvise(
+                file,
+                id.clone(),
+                file_name.clone(),
+                path.clone(),
+                file_len,
+            ));
             #[cfg(not(unix))]
-            let body = Body::from_stream(ReaderStream::new(file));
+            let body = Body::from_stream(file_stream_plain(
+                file,
+                id.clone(),
+                file_name.clone(),
+                path.clone(),
+                file_len,
+            ));
 
             let mut resp = Response::new(body);
             *resp.status_mut() = StatusCode::OK;
@@ -1255,6 +1451,31 @@ mod tests {
     fn pending_status_accepts_running_alias() {
         let status: PendingStatus = serde_json::from_str("\"running\"").unwrap();
         assert_eq!(status, PendingStatus::Downloading);
+    }
+
+    #[test]
+    fn build_webdav_candidate_paths_prefers_prefixes_then_original() {
+        let candidates = build_webdav_candidate_paths(
+            "/legacy/path/abc.mp4",
+            &["/mnt/media".to_string(), "incoming".to_string()],
+        );
+
+        assert_eq!(
+            candidates,
+            vec![
+                "/mnt/media/abc.mp4".to_string(),
+                "/incoming/abc.mp4".to_string(),
+                "/legacy/path/abc.mp4".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_webdav_candidate_paths_deduplicates_original_path() {
+        let candidates =
+            build_webdav_candidate_paths("/incoming/abc.mp4", &["incoming".to_string()]);
+
+        assert_eq!(candidates, vec!["/incoming/abc.mp4".to_string()]);
     }
 
     #[tokio::test]

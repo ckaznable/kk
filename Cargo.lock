@@ -1373,6 +1373,7 @@ dependencies = [
  "axum",
  "clap",
  "dirs 0.1.0",
+ "futures-util",
  "kr",
  "kwa",
  "playwright",

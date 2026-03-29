@@ -1,10 +1,23 @@
 use clap::{Parser, Subcommand};
+use futures_util::StreamExt;
 use kl::Scraper;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::{thread, time::Duration};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use walkdir::WalkDir;
+
+fn format_mib_per_sec(bytes: u64, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if secs <= f64::EPSILON {
+        return "n/a".to_string();
+    }
+    format!("{:.2}", bytes as f64 / (1024.0 * 1024.0) / secs)
+}
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -787,7 +800,7 @@ async fn run_pull_ks_downloads(
         // ── Step 1: Download ──────────────────────────────────────────────
         let file_url = format!("{}/downloads/webdav/ready/{}/file", base_url, item.id);
         println!("[pull-ks] Download request: GET {}", file_url);
-        let mut resp = client.get(&file_url).send().await?;
+        let resp = client.get(&file_url).send().await?;
         if !resp.status().is_success() {
             eprintln!(
                 "[pull-ks] Failed to download {} from ks: HTTP {}",
@@ -799,22 +812,26 @@ async fn run_pull_ks_downloads(
         }
 
         let stage_path = unique_stage_path(&staging_dir, &item.file_name);
-        let mut file = fs::File::create(&stage_path)?;
+        const DOWNLOAD_WRITE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+        let file = tokio::fs::File::create(&stage_path).await?;
+        let mut writer = BufWriter::with_capacity(DOWNLOAD_WRITE_BUFFER_SIZE, file);
         let mut downloaded_bytes = 0u64;
         let expected_size = if item.size_bytes > 0 {
             item.size_bytes
         } else {
             resp.content_length().unwrap_or(0)
         };
+        let download_started_at = Instant::now();
         let mut next_progress_pct = 10u64;
         let mut idle_timeout_count = 0u32;
+        let mut stream = resp.bytes_stream();
 
         loop {
-            let chunk_result = tokio::time::timeout(Duration::from_secs(20), resp.chunk()).await;
+            let chunk_result = tokio::time::timeout(Duration::from_secs(20), stream.next()).await;
             match chunk_result {
-                Ok(Ok(Some(chunk))) => {
+                Ok(Some(Ok(chunk))) => {
                     idle_timeout_count = 0;
-                    file.write_all(&chunk)?;
+                    writer.write_all(&chunk).await?;
                     downloaded_bytes += chunk.len() as u64;
 
                     if expected_size > 0 {
@@ -833,14 +850,14 @@ async fn run_pull_ks_downloads(
                         }
                     }
                 }
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => {
+                Ok(Some(Err(e))) => {
                     eprintln!("[pull-ks] Download error for {}: {}", item.file_name, e);
                     total_failed += 1;
                     // Remove partial file
                     let _ = fs::remove_file(&stage_path);
                     continue 'item;
                 }
+                Ok(None) => break,
                 Err(_) => {
                     idle_timeout_count += 1;
                     eprintln!(
@@ -865,6 +882,9 @@ async fn run_pull_ks_downloads(
             }
         }
 
+        writer.flush().await?;
+        let download_elapsed = download_started_at.elapsed();
+
         if expected_size > 0 && next_progress_pct <= 100 {
             println!(
                 "[pull-ks] [{} / {}] {} progress: 100% ({}/{})",
@@ -876,8 +896,12 @@ async fn run_pull_ks_downloads(
             );
         }
         println!(
-            "[pull-ks] Downloaded: {} -> {:?} ({} bytes)",
-            item.file_name, stage_path, downloaded_bytes
+            "[pull-ks] Downloaded: {} -> {:?} ({} bytes, {:.2}s, {} MiB/s)",
+            item.file_name,
+            stage_path,
+            downloaded_bytes,
+            download_elapsed.as_secs_f64(),
+            format_mib_per_sec(downloaded_bytes, download_elapsed)
         );
 
         // ── Step 2: Tidy ─────────────────────────────────────────────────

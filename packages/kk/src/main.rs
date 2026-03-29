@@ -571,8 +571,9 @@ fn main() {
                     }
                     Key::BackSpace => {
                         if matches!(menu.current_mode(), MenuMode::Actor(_)) {
+                            let last_mode = menu.last_mode();
                             menu.restore_last_page();
-                            draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), MenuMode::AddedTime);
+                            draw_menu_with_mode(menu.clone(), db.clone(), wd_db.clone(), last_mode);
                         } else {
                             menu.pop_symbol();
                             menu.draw();

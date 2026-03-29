@@ -20,7 +20,7 @@ enum Commands {
     DupNum,
     /// update thumbnail paths in the DB to use existing cache files
     FixThumb,
-    /// push both kr.json and kwa_db.json to the ks sync server
+    /// push kr.json, kwa_db.json, and kk_cache.json to the ks sync server
     Push {
         /// ks server base URL (overrides config.toml)
         #[arg(short, long)]
@@ -232,6 +232,7 @@ fn push(url: Option<String>) -> Result<()> {
 
     kr::sync::push_kr(&base_url)?;
     kr::sync::push_kwa(&base_url)?;
+    kr::sync::push_kk_cache(&base_url)?;
 
     Ok(())
 }

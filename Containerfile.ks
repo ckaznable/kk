@@ -29,6 +29,10 @@ WORKDIR /usr/src/app
 # 複製整個工作區程式碼
 COPY . .
 
+# container-bin/ 是給預先編好的 aarch64 binary image 用的；傳統 builder flow
+# 應該從 workspace 重新編譯，避免吃到殘留產物。
+RUN rm -rf container-bin
+
 # 指定編譯 ks 這個 sub-crate，並使用 release 模式
 RUN cargo build -p ks --release
 

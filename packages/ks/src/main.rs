@@ -452,6 +452,8 @@ fn format_mib_per_sec(bytes: u64, elapsed: Duration) -> String {
     format!("{:.2}", bytes as f64 / (1024.0 * 1024.0) / secs)
 }
 
+const STREAM_PROGRESS_STEP_PCT: u64 = 5;
+
 fn sanitize_filename(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
@@ -1066,8 +1068,8 @@ fn file_stream_with_fadvise(
     let started_at = Instant::now();
 
     futures_util::stream::unfold(
-        (inner, 0i64, 0i64, started_at),
-        move |(mut inner, mut bytes_read, mut last_advised, started_at)| {
+        (inner, 0i64, 0i64, started_at, STREAM_PROGRESS_STEP_PCT),
+        move |(mut inner, mut bytes_read, mut last_advised, started_at, mut next_progress_pct)| {
             let id = id.clone();
             let file_name = file_name.clone();
             let path = path.clone();
@@ -1078,6 +1080,28 @@ fn file_stream_with_fadvise(
                         match &result {
                             Ok(chunk) => {
                                 bytes_read += chunk.len() as i64;
+                                if let Some(expected_bytes) = expected_bytes
+                                    && expected_bytes > 0
+                                {
+                                    let streamed_bytes = bytes_read.max(0) as u64;
+                                    let pct =
+                                        (streamed_bytes.saturating_mul(100) / expected_bytes).min(100);
+                                    while pct >= next_progress_pct {
+                                        let elapsed = started_at.elapsed();
+                                        info!(
+                                            id = %id,
+                                            file_name = %file_name,
+                                            path = %path.display(),
+                                            progress_pct = next_progress_pct,
+                                            streamed_bytes,
+                                            expected_bytes,
+                                            elapsed_secs = elapsed.as_secs_f64(),
+                                            avg_mib_per_sec = %format_mib_per_sec(streamed_bytes, elapsed),
+                                            "Ready file stream progress"
+                                        );
+                                        next_progress_pct += STREAM_PROGRESS_STEP_PCT;
+                                    }
+                                }
                                 if bytes_read - last_advised >= FADVISE_INTERVAL {
                                     let start = last_advised;
                                     let len = bytes_read - last_advised;
@@ -1110,7 +1134,7 @@ fn file_stream_with_fadvise(
                             }
                         }
 
-                        Some((result, (inner, bytes_read, last_advised, started_at)))
+                        Some((result, (inner, bytes_read, last_advised, started_at, next_progress_pct)))
                     }
                     None => {
                         let streamed_bytes = bytes_read.max(0) as u64;
@@ -1148,8 +1172,8 @@ fn file_stream_plain(
     let started_at = Instant::now();
 
     futures_util::stream::unfold(
-        (inner, 0u64, started_at),
-        move |(mut inner, bytes_read, started_at)| {
+        (inner, 0u64, started_at, STREAM_PROGRESS_STEP_PCT),
+        move |(mut inner, bytes_read, started_at, mut next_progress_pct)| {
             let id = id.clone();
             let file_name = file_name.clone();
             let path = path.clone();
@@ -1158,7 +1182,31 @@ fn file_stream_plain(
                 match inner.next().await {
                     Some(result) => {
                         let next_bytes_read = match &result {
-                            Ok(chunk) => bytes_read.saturating_add(chunk.len() as u64),
+                            Ok(chunk) => {
+                                let next_bytes_read = bytes_read.saturating_add(chunk.len() as u64);
+                                if let Some(expected_bytes) = expected_bytes
+                                    && expected_bytes > 0
+                                {
+                                    let pct =
+                                        (next_bytes_read.saturating_mul(100) / expected_bytes).min(100);
+                                    while pct >= next_progress_pct {
+                                        let elapsed = started_at.elapsed();
+                                        info!(
+                                            id = %id,
+                                            file_name = %file_name,
+                                            path = %path.display(),
+                                            progress_pct = next_progress_pct,
+                                            streamed_bytes = next_bytes_read,
+                                            expected_bytes,
+                                            elapsed_secs = elapsed.as_secs_f64(),
+                                            avg_mib_per_sec = %format_mib_per_sec(next_bytes_read, elapsed),
+                                            "Ready file stream progress"
+                                        );
+                                        next_progress_pct += STREAM_PROGRESS_STEP_PCT;
+                                    }
+                                }
+                                next_bytes_read
+                            }
                             Err(err) => {
                                 let elapsed = started_at.elapsed();
                                 warn!(
@@ -1176,7 +1224,7 @@ fn file_stream_plain(
                             }
                         };
 
-                        Some((result, (inner, next_bytes_read, started_at)))
+                        Some((result, (inner, next_bytes_read, started_at, next_progress_pct)))
                     }
                     None => {
                         let elapsed = started_at.elapsed();

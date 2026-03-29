@@ -19,6 +19,18 @@ fn format_mib_per_sec(bytes: u64, elapsed: Duration) -> String {
     format!("{:.2}", bytes as f64 / (1024.0 * 1024.0) / secs)
 }
 
+const DOWNLOAD_PROGRESS_STEP_PCT: u64 = 5;
+
+async fn run_blocking_sync<T, F>(label: &'static str, f: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| anyhow::anyhow!("blocking task '{}' failed to join: {}", label, e))?
+}
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -265,11 +277,15 @@ async fn run_fix_db(
     // Sync latest kk cache snapshot from ks before scanning/fixing.
     if let Some(ref url) = dirs::ks_base_url() {
         println!("[fix-db] ks configured: {}", url);
-        match kr::sync::pull_kk_cache(url) {
+        let pull_url = url.clone();
+        match run_blocking_sync("pull_kk_cache", move || kr::sync::pull_kk_cache(&pull_url)).await {
             Ok(true) => println!("[fix-db] Pulled latest kk_cache.json from ks."),
             Ok(false) => {
                 println!("[fix-db] ks has no kk_cache.json yet, pushing local copy...");
-                if let Err(e) = kr::sync::push_kk_cache(url) {
+                let push_url = url.clone();
+                if let Err(e) =
+                    run_blocking_sync("push_kk_cache", move || kr::sync::push_kk_cache(&push_url)).await
+                {
                     eprintln!("[fix-db] Failed to push kk_cache.json to ks: {}", e);
                 }
             }
@@ -283,9 +299,10 @@ async fn run_fix_db(
     let javdb = kl::javdb::JavdbScraper::new()?;
     let fc2 = kl::fc2::Fc2Scraper::new()?;
 
-    // Initialize browser session only when we may actually scrape.
+    // Initialize browser session only when this run may actually scrape.
+    let only_fix_num = fix_num && !test_first && !list_need_fix;
     let mut browser_session = None;
-    let browser_scraper = if !headless && !list_need_fix {
+    let browser_scraper = if !headless && !list_need_fix && !only_fix_num {
         let scraper = kl::browser::BrowserScraper::new().await?;
         browser_session = Some(scraper.start_session("https://javdb.com/").await?);
         Some(scraper)
@@ -311,6 +328,8 @@ async fn run_fix_db(
         let mut needs_rescrape = false;
         // Analyze current state
         let mut target_download_url: Option<String> = None;
+        let mut download_reason: Option<String> = None;
+        let mut rescrape_reason: Option<String> = None;
 
         // Information for reporting
         let movie_title = db.config.movies[i].movie.title.clone();
@@ -362,39 +381,66 @@ async fn run_fix_db(
                 if let Some(thumb) = &movie_data.movie.thumb {
                     if thumb.starts_with("http") {
                         target_download_url = Some(thumb.clone());
+                        download_reason = Some(format!("thumb is remote URL in DB: {}", thumb));
                     } else if thumb.ends_with(".com") || thumb.contains(".com/") {
                         // println!("Suspicious thumb (URL-like): {}", thumb);
                         if thumb.contains("/") {
-                            target_download_url = Some(if thumb.starts_with("//") {
+                            let normalized = if thumb.starts_with("//") {
                                 format!("https:{}", thumb)
                             } else {
                                 format!("https://{}", thumb)
-                            });
+                            };
+                            target_download_url = Some(normalized.clone());
+                            download_reason = Some(format!(
+                                "thumb looks like schemeless remote URL in DB: {} -> {}",
+                                thumb, normalized
+                            ));
                         } else {
                             needs_rescrape = true;
+                            rescrape_reason = Some(format!(
+                                "thumb looks like malformed remote host without path: {}",
+                                thumb
+                            ));
                         }
                     } else {
-                        // Check local
-                        let p = PathBuf::from(thumb);
+                        // Check local using the same resolution order as the app:
+                        // absolute path -> thumb cache -> NFO-relative path.
+                        let p = movie_data
+                            .abs_thumb_path()
+                            .unwrap_or_else(|| PathBuf::from(thumb));
                         if !p.exists() {
-                            // println!("Missing local thumb: {:?}", p);
                             needs_rescrape = true;
+                            rescrape_reason = Some(format!(
+                                "resolved thumb path does not exist (thumb='{}', resolved='{}')",
+                                thumb,
+                                p.display()
+                            ));
                         } else {
                             if let Some(ext) = p.extension() {
                                 let ext_s = ext.to_string_lossy().to_lowercase();
                                 if !["jpg", "jpeg", "png", "gif", "webp"].contains(&ext_s.as_str())
                                 {
-                                    // println!("Invalid thumb extension: {:?}", p);
                                     needs_rescrape = true;
+                                    rescrape_reason = Some(format!(
+                                        "resolved thumb has unsupported extension '.{}' (thumb='{}', resolved='{}')",
+                                        ext_s,
+                                        thumb,
+                                        p.display()
+                                    ));
                                 }
                             } else {
-                                // println!("No extension for thumb: {:?}", p);
                                 needs_rescrape = true;
+                                rescrape_reason = Some(format!(
+                                    "resolved thumb path has no file extension (thumb='{}', resolved='{}')",
+                                    thumb,
+                                    p.display()
+                                ));
                             }
                         }
                     }
                 } else {
-                    // No thumb
+                    needs_rescrape = true;
+                    rescrape_reason = Some("thumb is missing from DB".to_string());
                 }
             }
         }
@@ -404,14 +450,22 @@ async fn run_fix_db(
         if list_need_fix {
             if let Some(url) = target_download_url {
                 println!(
-                    "[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Download URL ({})",
-                    display_id, movie_title, url
+                    "[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Download URL ({}) | Reason: {}",
+                    display_id,
+                    movie_title,
+                    url,
+                    download_reason.unwrap_or_else(|| "thumb can be downloaded directly".to_string())
                 );
                 found_issues_count += 1;
                 continue;
             }
             if needs_rescrape {
-                println!("[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Re-scrape (Invalid/Missing Thumb)", display_id, movie_title);
+                println!(
+                    "[Fix Needed] ID: {:<12} | Title: {:.30} | Action: Re-scrape | Reason: {}",
+                    display_id,
+                    movie_title,
+                    rescrape_reason.unwrap_or_else(|| "invalid or missing thumb".to_string())
+                );
                 found_issues_count += 1;
                 continue;
             }
@@ -582,7 +636,10 @@ async fn run_fix_db(
         // Push to ks server if configured
         if let Some(ref url) = dirs::ks_base_url() {
             println!("[fix-db] Syncing kr.json to ks...");
-            if let Err(e) = kr::sync::push_kr(url) {
+            let url = url.clone();
+            if let Err(e) =
+                run_blocking_sync("push_kr", move || kr::sync::push_kr(&url)).await
+            {
                 eprintln!("[fix-db] Failed to push kr.json to ks: {}", e);
             }
         }
@@ -822,7 +879,7 @@ async fn run_pull_ks_downloads(
             resp.content_length().unwrap_or(0)
         };
         let download_started_at = Instant::now();
-        let mut next_progress_pct = 10u64;
+        let mut next_progress_pct = DOWNLOAD_PROGRESS_STEP_PCT;
         let mut idle_timeout_count = 0u32;
         let mut stream = resp.bytes_stream();
 
@@ -837,16 +894,19 @@ async fn run_pull_ks_downloads(
                     if expected_size > 0 {
                         let pct = (downloaded_bytes.saturating_mul(100) / expected_size).min(100);
                         while pct >= next_progress_pct {
+                            let elapsed = download_started_at.elapsed();
                             println!(
-                                "[pull-ks] [{} / {}] {} progress: {}% ({}/{})",
+                                "[pull-ks] [{} / {}] {} progress: {}% ({}/{}, {:.2}s, {} MiB/s)",
                                 idx + 1,
                                 total_ready,
                                 item.file_name,
                                 next_progress_pct,
                                 downloaded_bytes,
-                                expected_size
+                                expected_size,
+                                elapsed.as_secs_f64(),
+                                format_mib_per_sec(downloaded_bytes, elapsed)
                             );
-                            next_progress_pct += 10;
+                            next_progress_pct += DOWNLOAD_PROGRESS_STEP_PCT;
                         }
                     }
                 }
@@ -860,13 +920,16 @@ async fn run_pull_ks_downloads(
                 Ok(None) => break,
                 Err(_) => {
                     idle_timeout_count += 1;
+                    let elapsed = download_started_at.elapsed();
                     eprintln!(
-                        "[pull-ks] [{} / {}] waiting for data: {} (no chunks for {}s, downloaded={} bytes)",
+                        "[pull-ks] [{} / {}] waiting for data: {} (no chunks for {}s, downloaded={} bytes, {:.2}s total, {} MiB/s)",
                         idx + 1,
                         total_ready,
                         item.file_name,
                         idle_timeout_count * 20,
-                        downloaded_bytes
+                        downloaded_bytes,
+                        elapsed.as_secs_f64(),
+                        format_mib_per_sec(downloaded_bytes, elapsed)
                     );
                     if idle_timeout_count >= 30 {
                         eprintln!(
@@ -886,13 +949,16 @@ async fn run_pull_ks_downloads(
         let download_elapsed = download_started_at.elapsed();
 
         if expected_size > 0 && next_progress_pct <= 100 {
+            let elapsed = download_elapsed;
             println!(
-                "[pull-ks] [{} / {}] {} progress: 100% ({}/{})",
+                "[pull-ks] [{} / {}] {} progress: 100% ({}/{}, {:.2}s, {} MiB/s)",
                 idx + 1,
                 total_ready,
                 item.file_name,
                 downloaded_bytes,
-                expected_size
+                expected_size,
+                elapsed.as_secs_f64(),
+                format_mib_per_sec(downloaded_bytes, elapsed)
             );
         }
         println!(
@@ -1393,7 +1459,8 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
     // Push to ks server if configured
     if let Some(ref url) = dirs::ks_base_url() {
         println!("[tidy] Syncing kr.json to ks...");
-        if let Err(e) = kr::sync::push_kr(url) {
+        let url = url.clone();
+        if let Err(e) = run_blocking_sync("push_kr", move || kr::sync::push_kr(&url)).await {
             eprintln!("[tidy] Failed to push kr.json to ks: {}", e);
         }
     }

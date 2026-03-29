@@ -17,6 +17,8 @@ Containerfile*
 
 # 本地資料檔案 (不應打包進 image)
 ks_data/
+kk_ks_ready_staging/
+container-bin/
 **/*.json
 **/*.toml.local
 

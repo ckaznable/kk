@@ -53,30 +53,25 @@ impl MenuMode {
 
 #[derive(Clone)]
 pub struct RenderItem {
-    pub path: String, // NFO path or WebDAV relative path
     pub img_path: PathBuf,
     pub title: String,
     pub num: Option<String>, // Movie number / ID for fallback display
     pub index: u32,
     pub fav: bool,
-    pub is_webdav: bool,
 }
 
 impl TryFrom<IndexedMovieData<'_>> for RenderItem {
     type Error = ();
 
     fn try_from(value: IndexedMovieData<'_>) -> Result<Self, Self::Error> {
-        let nfo_path = value.movie.abs_path();
         let img_path = value.movie.abs_thumb_path().ok_or(())?;
 
         Ok(Self {
-            path: nfo_path.to_string_lossy().to_string(),
             img_path,
             title: value.movie.movie.title.clone(),
             num: value.movie.movie.num.clone(),
             index: value.index,
             fav: value.movie.fav,
-            is_webdav: false,
         })
     }
 }
@@ -86,13 +81,11 @@ impl From<(usize, &kr::db::WebDavMovieData)> for RenderItem {
         let (index, data) = value;
         let img_path = data.abs_thumb_path().unwrap_or_default();
         Self {
-            path: data.url_path.clone(),
             img_path,
             title: data.movie.title.clone(),
             num: data.movie.num.clone(),
             index: index as u32,
             fav: data.fav,
-            is_webdav: true,
         }
     }
 }

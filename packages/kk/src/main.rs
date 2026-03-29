@@ -6,8 +6,10 @@ use fltk::{
     group::{Group, Wizard},
     menu,
     prelude::{GroupExt, WidgetBase, WidgetExt, WindowExt},
-    window::{GlWindow, Window},
+    window::Window,
 };
+#[cfg(not(target_os = "linux"))]
+use fltk::window::GlWindow;
 use libmpv2::Mpv;
 use serde_json::json;
 use std::{

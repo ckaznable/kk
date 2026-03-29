@@ -517,13 +517,32 @@ fn normalize_webdav_prefix(prefix: &str) -> String {
 fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> Vec<String> {
     let mut out = Vec::new();
 
+    let normalized_original = original.trim().replace('\\', "/");
+    let original_relative = normalized_original.trim_start_matches('/');
+    let remaining_subpath = original_relative
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .filter(|rest| !rest.is_empty());
+
     let file_name = FsPath::new(original)
         .file_name()
         .map(|n| n.to_string_lossy().to_string());
 
-    // Prefix-based paths first – the original url_path from kk may be stale,
-    // so prefer the configured source prefixes to locate the file.
-    if let Some(ref file_name) = file_name {
+    // Prefix-based paths first – replace only the first directory segment and
+    // preserve the rest of the original path whenever possible.
+    if let Some(remaining_subpath) = remaining_subpath {
+        for prefix in source_prefixes {
+            let base = normalize_webdav_prefix(prefix);
+            let candidate = if base == "/" {
+                format!("/{}", remaining_subpath)
+            } else {
+                format!("{}/{}", base, remaining_subpath)
+            };
+            if !out.iter().any(|p| p == &candidate) {
+                out.push(candidate);
+            }
+        }
+    } else if let Some(ref file_name) = file_name {
         for prefix in source_prefixes {
             let base = normalize_webdav_prefix(prefix);
             let candidate = if base == "/" {
@@ -1557,7 +1576,7 @@ mod tests {
     }
 
     #[test]
-    fn build_webdav_candidate_paths_prefers_prefixes_then_original() {
+    fn build_webdav_candidate_paths_replaces_only_first_directory() {
         let candidates = build_webdav_candidate_paths(
             "/legacy/path/abc.mp4",
             &["/mnt/media".to_string(), "incoming".to_string()],
@@ -1566,8 +1585,8 @@ mod tests {
         assert_eq!(
             candidates,
             vec![
-                "/mnt/media/abc.mp4".to_string(),
-                "/incoming/abc.mp4".to_string(),
+                "/mnt/media/path/abc.mp4".to_string(),
+                "/incoming/path/abc.mp4".to_string(),
                 "/legacy/path/abc.mp4".to_string()
             ]
         );

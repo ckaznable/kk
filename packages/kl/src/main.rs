@@ -31,6 +31,33 @@ where
         .map_err(|e| anyhow::anyhow!("blocking task '{}' failed to join: {}", label, e))?
 }
 
+async fn sync_kk_cache_from_ks(log_prefix: &str) {
+    if let Some(ref url) = dirs::ks_base_url() {
+        println!("[{}] ks configured: {}", log_prefix, url);
+        let pull_url = url.clone();
+        match run_blocking_sync("pull_kk_cache", move || kr::sync::pull_kk_cache(&pull_url)).await {
+            Ok(true) => println!("[{}] Pulled latest kk_cache.json from ks.", log_prefix),
+            Ok(false) => {
+                println!(
+                    "[{}] ks has no kk_cache.json yet, pushing local copy...",
+                    log_prefix
+                );
+                let push_url = url.clone();
+                if let Err(e) =
+                    run_blocking_sync("push_kk_cache", move || kr::sync::push_kk_cache(&push_url))
+                        .await
+                {
+                    eprintln!("[{}] Failed to push kk_cache.json to ks: {}", log_prefix, e);
+                }
+            }
+            Err(e) => eprintln!(
+                "[{}] Failed to pull kk_cache.json from ks: {}",
+                log_prefix, e
+            ),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -264,24 +291,7 @@ async fn run_fix_db(
     list_need_fix: bool,
     headless: bool,
 ) -> anyhow::Result<()> {
-    // Sync latest kk cache snapshot from ks before scanning/fixing.
-    if let Some(ref url) = dirs::ks_base_url() {
-        println!("[fix-db] ks configured: {}", url);
-        let pull_url = url.clone();
-        match run_blocking_sync("pull_kk_cache", move || kr::sync::pull_kk_cache(&pull_url)).await {
-            Ok(true) => println!("[fix-db] Pulled latest kk_cache.json from ks."),
-            Ok(false) => {
-                println!("[fix-db] ks has no kk_cache.json yet, pushing local copy...");
-                let push_url = url.clone();
-                if let Err(e) =
-                    run_blocking_sync("push_kk_cache", move || kr::sync::push_kk_cache(&push_url)).await
-                {
-                    eprintln!("[fix-db] Failed to push kk_cache.json to ks: {}", e);
-                }
-            }
-            Err(e) => eprintln!("[fix-db] Failed to pull kk_cache.json from ks: {}", e),
-        }
-    }
+    sync_kk_cache_from_ks("fix-db").await;
 
     // Explicitly load DB configuration instead of using default empty init
     let mut db = kr::db::SimpleJsonDatabase::new()
@@ -662,6 +672,8 @@ async fn run_webdav_scraper(
     cookie: Option<String>,
     headless: bool,
 ) -> anyhow::Result<()> {
+    sync_kk_cache_from_ks("webdav").await;
+
     let mut db = kr::db::WebDavDatabase::new()?;
 
     // ... (config logic)

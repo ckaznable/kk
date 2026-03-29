@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::SimpleJsonDatabase;
 
+pub mod cache;
 pub mod db;
 pub mod sync;
 pub mod util;

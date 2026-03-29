@@ -3,7 +3,6 @@ pub mod browser;
 pub mod fc2;
 pub mod javdb;
 pub mod number_parser;
-pub mod server;
 
 use anyhow::Result;
 use kr::Movie;

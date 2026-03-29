@@ -30,7 +30,7 @@ pub struct KsReadyDownload {
 }
 
 fn kk_cache_path() -> std::path::PathBuf {
-    dirs::DIR.config_local_dir().join("kk_cache.json")
+    crate::cache::KkCache::cache_path()
 }
 
 /// Fetch `kr.json` content from the ks server and overwrite the local file.

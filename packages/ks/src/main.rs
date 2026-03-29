@@ -29,7 +29,7 @@ use tracing::{error, info, warn};
 #[derive(Clone)]
 struct AppState {
     data_dir: PathBuf,
-    cache: Arc<Mutex<kl::server::KkCache>>,
+    cache: Arc<Mutex<kr::cache::KkCache>>,
     downloads: DownloadManager,
 }
 
@@ -984,7 +984,7 @@ async fn get_kk_cache(State(state): State<AppState>) -> Response {
 }
 
 async fn put_kk_cache(State(state): State<AppState>, body: String) -> Response {
-    let parsed = match serde_json::from_str::<kl::server::KkCache>(&body) {
+    let parsed = match serde_json::from_str::<kr::cache::KkCache>(&body) {
         Ok(v) => v,
         Err(_) => return err_json(StatusCode::BAD_REQUEST, "Invalid kk_cache JSON"),
     };
@@ -1334,7 +1334,7 @@ async fn delete_download_webdav_ready(
 
 async fn handle_cache(
     State(state): State<AppState>,
-    Json(req): Json<kl::server::CacheRequest>,
+    Json(req): Json<kr::cache::CacheRequest>,
 ) -> Response {
     let result = parse_cache_request(&req);
     match result {
@@ -1370,7 +1370,7 @@ async fn handle_cache(
     }
 }
 
-fn parse_cache_request(req: &kl::server::CacheRequest) -> Result<kr::Movie> {
+fn parse_cache_request(req: &kr::cache::CacheRequest) -> Result<kr::Movie> {
     match req.scraper_type.to_lowercase().as_str() {
         "javdb" => {
             let scraper = kl::javdb::JavdbScraper::new()?;
@@ -1454,7 +1454,7 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         data_dir,
-        cache: Arc::new(Mutex::new(kl::server::KkCache::load())),
+        cache: Arc::new(Mutex::new(kr::cache::KkCache::load())),
         downloads,
     };
 

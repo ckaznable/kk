@@ -1332,7 +1332,6 @@ dependencies = [
  "anyhow",
  "async-recursion",
  "async-trait",
- "axum",
  "clap",
  "dirs 0.1.0",
  "futures-util",
@@ -1346,7 +1345,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tower-http",
  "walkdir",
 ]
 

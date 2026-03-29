@@ -120,13 +120,6 @@ enum Commands {
         headless: bool,
     },
 
-    /// Start the cache HTTP server that accepts pre-fetched HTML and stores parsed metadata
-    Serve {
-        /// Port to listen on (default: 6969)
-        #[arg(short, long, default_value = "6969")]
-        port: u16,
-    },
-
     /// Pull ready WebDAV downloads from ks, tidy locally, then delete ks cache
     PullKs {
         /// ks server base URL (overrides config.toml)
@@ -179,9 +172,6 @@ async fn main() -> anyhow::Result<()> {
             headless,
         } => {
             run_test_scrape(&id, cookie, headless).await?;
-        }
-        Commands::Serve { port } => {
-            kl::server::run_server(port).await?;
         }
         Commands::PullKs {
             url,
@@ -1160,7 +1150,7 @@ async fn recursive_scan_webdav(
 
             // 1. Check kk_cache first
             {
-                let cache = kl::server::KkCache::load();
+                let cache = kr::cache::KkCache::load();
                 if let Some(m) = cache.find(&num) {
                     println!("  Found in kk_cache, reusing metadata.");
                     existing_movie = Some(m.clone());
@@ -1278,7 +1268,7 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
 
                         // 1. Check kk_cache first
                         {
-                            let cache = kl::server::KkCache::load();
+                            let cache = kr::cache::KkCache::load();
                             if let Some(m) = cache.find(&number) {
                                 println!("  Found in kk_cache, reusing metadata.");
                                 existing_movie = Some(m.clone());

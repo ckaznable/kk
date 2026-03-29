@@ -39,6 +39,9 @@ pub struct KsConfig {
     pub base_url: Option<String>,
     pub download_max_total_bytes: Option<u64>,
     pub download_cache_dir: Option<String>,
+    pub download_target_dir: Option<String>,
+    pub webdav_source_prefix: Option<String>,
+    pub webdav_source_prefixes: Option<Vec<String>>,
 }
 
 /// Path to config.toml: `<config_local_dir>/config.toml`
@@ -79,4 +82,39 @@ pub fn ks_download_cache_dir() -> Option<PathBuf> {
         .ks
         .and_then(|ks| ks.download_cache_dir)
         .map(PathBuf::from)
+}
+
+/// Convenience: return ks WebDAV download target directory override.
+pub fn ks_download_target_dir() -> Option<PathBuf> {
+    load_config()
+        .ks
+        .and_then(|ks| ks.download_target_dir)
+        .map(PathBuf::from)
+}
+
+/// Convenience: return WebDAV source prefix fallbacks used by ks downloader.
+///
+/// `webdav_source_prefix` is applied first, then `webdav_source_prefixes`.
+pub fn ks_webdav_source_prefixes() -> Vec<String> {
+    let Some(ks) = load_config().ks else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+
+    if let Some(prefix) = ks.webdav_source_prefix
+        && !prefix.trim().is_empty()
+    {
+        out.push(prefix);
+    }
+
+    if let Some(prefixes) = ks.webdav_source_prefixes {
+        for prefix in prefixes {
+            if !prefix.trim().is_empty() {
+                out.push(prefix);
+            }
+        }
+    }
+
+    out
 }

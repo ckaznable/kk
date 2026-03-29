@@ -290,8 +290,25 @@ async fn run_fix_db(
             file_stem_for_id = p.file_stem().unwrap().to_string_lossy().to_string();
         }
 
+        // Fix: if num is purely alphabetic (only letters, no "-"), replace with file stem
+        if let Some(ref num) = movie_num_opt {
+            let is_alpha_only = !num.is_empty()
+                && num.chars().all(|c| c.is_ascii_alphabetic())
+                && !num.contains('-');
+            if is_alpha_only {
+                println!(
+                    "  [Fix Num] '{}' is alpha-only, updating num to file stem '{}'",
+                    num, file_stem_for_id
+                );
+                if !dry_run {
+                    db.config.movies[i].movie.num = Some(file_stem_for_id.clone());
+                    modified = true;
+                }
+            }
+        }
+
         // Try getting ID from movie.num, fallback to file_stem
-        let movie_num = movie_num_opt.clone();
+        let movie_num = db.config.movies[i].movie.num.clone();
         let cache_id = movie_num
             .clone()
             .unwrap_or_else(|| file_stem_for_id.clone());
@@ -518,6 +535,14 @@ async fn run_fix_db(
     if modified {
         db.flush();
         println!("Database flushed with {} fixes.", fix_count);
+
+        // Push to ks server if configured
+        if let Some(ref url) = dirs::ks_base_url() {
+            println!("[fix-db] Syncing kr.json to ks...");
+            if let Err(e) = kr::sync::push_kr(url) {
+                eprintln!("[fix-db] Failed to push kr.json to ks: {}", e);
+            }
+        }
     } else {
         println!("No changes made.");
     }
@@ -658,9 +683,21 @@ async fn run_pull_ks_downloads(
         .ok_or_else(|| anyhow::anyhow!("No ks base URL provided. Pass --url or set ks.base_url"))?;
     let base_url = base_url.trim_end_matches('/').to_string();
 
-    let client = reqwest::Client::new();
+    println!(
+        "[pull-ks] Start workflow: base_url={}, output={:?}, dry_run={}",
+        base_url, output, dry_run
+    );
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()?;
     let list_url = format!("{}/downloads/webdav/ready", base_url);
+    println!("[pull-ks] Request ready list: GET {}", list_url);
     let list_resp = client.get(&list_url).send().await?;
+    println!(
+        "[pull-ks] Ready list response status: {}",
+        list_resp.status()
+    );
     if !list_resp.status().is_success() {
         return Err(anyhow::anyhow!(
             "ks returned {} for GET /downloads/webdav/ready",
@@ -670,11 +707,18 @@ async fn run_pull_ks_downloads(
 
     let ready: Vec<kr::sync::KsReadyDownload> = list_resp.json().await?;
     if ready.is_empty() {
-        println!("No ready downloads on ks.");
+        println!("[pull-ks] No ready downloads on ks.");
         return Ok(());
     }
 
-    println!("Found {} ready download(s) on ks.", ready.len());
+    println!("[pull-ks] Found {} ready download(s) on ks.", ready.len());
+    for item in &ready {
+        println!(
+            "[pull-ks] Ready item: id={}, file={}, size={} bytes, path={}",
+            item.id, item.file_name, item.size_bytes, item.url_path
+        );
+    }
+
     if dry_run {
         for item in ready {
             println!(
@@ -682,67 +726,182 @@ async fn run_pull_ks_downloads(
                 item.id, item.file_name, item.size_bytes, item.url_path
             );
         }
+        println!("[pull-ks] Dry run enabled, stopping before download.");
         return Ok(());
     }
 
-    let staging_dir = dirs::DIR.config_local_dir().join("ks_ready_staging");
+    let staging_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("kk_ks_ready_staging");
     if !staging_dir.exists() {
+        println!("[pull-ks] Creating staging dir: {:?}", staging_dir);
         fs::create_dir_all(&staging_dir)?;
+    } else {
+        println!("[pull-ks] Using existing staging dir: {:?}", staging_dir);
     }
 
-    let mut downloaded: Vec<(String, PathBuf)> = Vec::new();
-    for item in ready {
+    let mut total_success = 0usize;
+    let mut total_failed = 0usize;
+    let total_ready = ready.len();
+
+    'item: for (idx, item) in ready.into_iter().enumerate() {
+        println!(
+            "[pull-ks] [{}/{}] Processing: id={}, file={}, size={} bytes",
+            idx + 1,
+            total_ready,
+            item.id,
+            item.file_name,
+            item.size_bytes
+        );
+
+        // ── Step 1: Download ──────────────────────────────────────────────
         let file_url = format!("{}/downloads/webdav/ready/{}/file", base_url, item.id);
-        let resp = client.get(&file_url).send().await?;
+        println!("[pull-ks] Download request: GET {}", file_url);
+        let mut resp = client.get(&file_url).send().await?;
         if !resp.status().is_success() {
             eprintln!(
-                "Failed to download {} from ks: HTTP {}",
+                "[pull-ks] Failed to download {} from ks: HTTP {}",
                 item.file_name,
                 resp.status()
             );
+            total_failed += 1;
             continue;
         }
 
-        let bytes = resp.bytes().await?;
-        let path = unique_stage_path(&staging_dir, &item.file_name);
-        fs::write(&path, &bytes)?;
-        println!("Downloaded from ks: {} -> {:?}", item.file_name, path);
-        downloaded.push((item.id, path));
-    }
+        let stage_path = unique_stage_path(&staging_dir, &item.file_name);
+        let mut file = fs::File::create(&stage_path)?;
+        let mut downloaded_bytes = 0u64;
+        let expected_size = if item.size_bytes > 0 {
+            item.size_bytes
+        } else {
+            resp.content_length().unwrap_or(0)
+        };
+        let mut next_progress_pct = 10u64;
+        let mut idle_timeout_count = 0u32;
 
-    if downloaded.is_empty() {
-        println!("No files downloaded from ks.");
-        return Ok(());
-    }
+        loop {
+            let chunk_result = tokio::time::timeout(Duration::from_secs(20), resp.chunk()).await;
+            match chunk_result {
+                Ok(Ok(Some(chunk))) => {
+                    idle_timeout_count = 0;
+                    file.write_all(&chunk)?;
+                    downloaded_bytes += chunk.len() as u64;
 
-    run_scraper(staging_dir.clone(), output).await?;
+                    if expected_size > 0 {
+                        let pct =
+                            (downloaded_bytes.saturating_mul(100) / expected_size).min(100);
+                        while pct >= next_progress_pct {
+                            println!(
+                                "[pull-ks] [{} / {}] {} progress: {}% ({}/{})",
+                                idx + 1,
+                                total_ready,
+                                item.file_name,
+                                next_progress_pct,
+                                downloaded_bytes,
+                                expected_size
+                            );
+                            next_progress_pct += 10;
+                        }
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
+                    eprintln!("[pull-ks] Download error for {}: {}", item.file_name, e);
+                    total_failed += 1;
+                    // Remove partial file
+                    let _ = fs::remove_file(&stage_path);
+                    continue 'item;
+                }
+                Err(_) => {
+                    idle_timeout_count += 1;
+                    eprintln!(
+                        "[pull-ks] [{} / {}] waiting for data: {} (no chunks for {}s, downloaded={} bytes)",
+                        idx + 1,
+                        total_ready,
+                        item.file_name,
+                        idle_timeout_count * 20,
+                        downloaded_bytes
+                    );
+                    if idle_timeout_count >= 30 {
+                        eprintln!(
+                            "[pull-ks] Download stalled for {}: giving up after {} seconds",
+                            item.file_name,
+                            idle_timeout_count * 20
+                        );
+                        total_failed += 1;
+                        let _ = fs::remove_file(&stage_path);
+                        continue 'item;
+                    }
+                }
+            }
+        }
 
-    let mut deleted_count = 0usize;
-    for (id, local_path) in downloaded {
-        if local_path.exists() {
-            eprintln!(
-                "Skip ks delete for {}: local file still exists after tidy ({:?})",
-                id, local_path
+        if expected_size > 0 && next_progress_pct <= 100 {
+            println!(
+                "[pull-ks] [{} / {}] {} progress: 100% ({}/{})",
+                idx + 1,
+                total_ready,
+                item.file_name,
+                downloaded_bytes,
+                expected_size
             );
+        }
+        println!(
+            "[pull-ks] Downloaded: {} -> {:?} ({} bytes)",
+            item.file_name, stage_path, downloaded_bytes
+        );
+
+        // ── Step 2: Tidy ─────────────────────────────────────────────────
+        println!(
+            "[pull-ks] [{}/{}] Tidy: {:?} -> {:?}",
+            idx + 1,
+            total_ready,
+            staging_dir,
+            output
+        );
+        if let Err(e) = run_scraper(staging_dir.clone(), output.clone()).await {
+            eprintln!("[pull-ks] Tidy failed for {}: {}", item.file_name, e);
+            total_failed += 1;
+            // Leave the file for manual inspection
+            continue;
+        }
+        println!("[pull-ks] [{}/{}] Tidy completed.", idx + 1, total_ready);
+
+        // ── Step 3: Delete ks cache ───────────────────────────────────────
+        // Only delete from ks if tidy moved the file (staging file is gone)
+        if stage_path.exists() {
+            eprintln!(
+                "[pull-ks] Skip ks delete for {}: staging file still exists after tidy ({:?})",
+                item.id, stage_path
+            );
+            total_failed += 1;
             continue;
         }
 
-        let delete_url = format!("{}/downloads/webdav/ready/{}", base_url, id);
+        let delete_url = format!("{}/downloads/webdav/ready/{}", base_url, item.id);
+        println!("[pull-ks] Delete request: DELETE {}", delete_url);
         let del_resp = client.delete(&delete_url).send().await?;
         if del_resp.status().is_success() {
-            deleted_count += 1;
+            total_success += 1;
+            println!(
+                "[pull-ks] [{}/{}] Done: deleted ks ready item {}",
+                idx + 1,
+                total_ready,
+                item.id
+            );
         } else {
             eprintln!(
-                "Failed to delete ks ready item {}: HTTP {}",
-                id,
+                "[pull-ks] Failed to delete ks ready item {}: HTTP {}",
+                item.id,
                 del_resp.status()
             );
+            total_failed += 1;
         }
     }
 
     println!(
-        "Completed ks pull workflow. Deleted {} ready item(s) from ks.",
-        deleted_count
+        "[pull-ks] Completed workflow: success={}, failed={}",
+        total_success, total_failed
     );
     Ok(())
 }

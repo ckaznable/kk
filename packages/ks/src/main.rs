@@ -9,14 +9,20 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::io::ReaderStream;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use tokio_util::bytes;
 
 // ── Server State ─────────────────────────────────────────────────────────────
 
@@ -110,7 +116,12 @@ struct QueuedDownload {
     source_pass: Option<String>,
     status: PendingStatus,
     enqueued_at: u64,
+    #[serde(default)]
+    retry_count: u32,
 }
+
+const MAX_DOWNLOAD_RETRIES: u32 = 5;
+const KK_NOTIFY_URL: &str = "http://ntfy-service.ntfy.svc.cluster.local/kk";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ReadyDownload {
@@ -249,6 +260,7 @@ impl DownloadManager {
             source_pass,
             status: PendingStatus::Queued,
             enqueued_at: now,
+            retry_count: 0,
         });
 
         let snapshot = state.clone();
@@ -287,6 +299,32 @@ impl DownloadManager {
             drop(state);
             self.persist_snapshot(&snapshot).await?;
         }
+        Ok(())
+    }
+
+    /// Increment retry count, set back to queued, and return the new count.
+    async fn increment_retry_count(&self, id: &str) -> Result<u32> {
+        let mut state = self.state.lock().await;
+        if let Some(item) = state.pending.iter_mut().find(|d| d.id == id) {
+            item.retry_count += 1;
+            item.status = PendingStatus::Queued;
+            let count = item.retry_count;
+            let snapshot = state.clone();
+            drop(state);
+            self.persist_snapshot(&snapshot).await?;
+            Ok(count)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Remove a pending download entirely (used after max retries exceeded).
+    async fn remove_pending(&self, id: &str) -> Result<()> {
+        let mut state = self.state.lock().await;
+        state.pending.retain(|d| d.id != id);
+        let snapshot = state.clone();
+        drop(state);
+        self.persist_snapshot(&snapshot).await?;
         Ok(())
     }
 
@@ -439,27 +477,30 @@ fn normalize_webdav_prefix(prefix: &str) -> String {
 
 fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> Vec<String> {
     let mut out = Vec::new();
-    if !original.trim().is_empty() {
-        out.push(original.to_string());
+
+    let file_name = FsPath::new(original)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string());
+
+    // Prefix-based paths first – the original url_path from kk may be stale,
+    // so prefer the configured source prefixes to locate the file.
+    if let Some(ref file_name) = file_name {
+        for prefix in source_prefixes {
+            let base = normalize_webdav_prefix(prefix);
+            let candidate = if base == "/" {
+                format!("/{}", file_name)
+            } else {
+                format!("{}/{}", base, file_name)
+            };
+            if !out.iter().any(|p| p == &candidate) {
+                out.push(candidate);
+            }
+        }
     }
 
-    let Some(file_name) = FsPath::new(original)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-    else {
-        return out;
-    };
-
-    for prefix in source_prefixes {
-        let base = normalize_webdav_prefix(prefix);
-        let candidate = if base == "/" {
-            format!("/{}", file_name)
-        } else {
-            format!("{}/{}", base, file_name)
-        };
-        if !out.iter().any(|p| p == &candidate) {
-            out.push(candidate);
-        }
+    // Original path as fallback
+    if !original.trim().is_empty() && !out.iter().any(|p| p == original) {
+        out.push(original.to_string());
     }
 
     out
@@ -485,7 +526,18 @@ fn dir_size_bytes(path: &FsPath) -> u64 {
     total
 }
 
+const MIN_READY_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024; // 200 MiB
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WebDavClientKey {
+    base_url: String,
+    source_user: Option<String>,
+    source_pass: Option<String>,
+}
+
 async fn download_worker_loop(manager: DownloadManager) {
+    let mut client_pool: HashMap<WebDavClientKey, kwa::WebDavClient> = HashMap::new();
+
     loop {
         let next = match manager.pop_next_queued_mark_downloading().await {
             Ok(Some(task)) => task,
@@ -532,18 +584,31 @@ async fn download_worker_loop(manager: DownloadManager) {
             }
         }
 
-        let client = match kwa::WebDavClient::new(
-            &next.source_base_url,
-            next.source_user.clone().zip(next.source_pass.clone()),
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = %e, id = %next.id, "Failed to create WebDAV client");
-                if let Err(e) = manager.set_queued(&next.id).await {
-                    error!(error = %e, id = %next.id, "Failed to reset queued status");
+        let key = WebDavClientKey {
+            base_url: next.source_base_url.clone(),
+            source_user: next.source_user.clone(),
+            source_pass: next.source_pass.clone(),
+        };
+
+        let client = if let Some(existing) = client_pool.get(&key) {
+            existing.clone()
+        } else {
+            match kwa::WebDavClient::new(
+                &key.base_url,
+                key.source_user.clone().zip(key.source_pass.clone()),
+            ) {
+                Ok(c) => {
+                    client_pool.insert(key, c.clone());
+                    c
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+                Err(e) => {
+                    error!(error = %e, id = %next.id, "Failed to create WebDAV client");
+                    if let Err(e) = manager.set_queued(&next.id).await {
+                        error!(error = %e, id = %next.id, "Failed to reset queued status");
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
             }
         };
 
@@ -566,12 +631,51 @@ async fn download_worker_loop(manager: DownloadManager) {
             "Starting WebDAV background download"
         );
 
-        let mut downloaded_from: Option<String> = None;
+        let mut downloaded: Option<(String, u64)> = None;
         let mut last_error: Option<String> = None;
         for path in &candidate_paths {
             match client.download(path, &dest).await {
                 Ok(()) => {
-                    downloaded_from = Some(path.clone());
+                    let size = match tokio::fs::metadata(&dest).await {
+                        Ok(m) => m.len(),
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                id = %next.id,
+                                path = %path,
+                                "Downloaded file metadata check failed"
+                            );
+                            last_error = Some(format!("metadata check failed: {}", e));
+                            continue;
+                        }
+                    };
+
+                    if size < MIN_READY_DOWNLOAD_BYTES {
+                        warn!(
+                            id = %next.id,
+                            path = %path,
+                            bytes = size,
+                            min_bytes = MIN_READY_DOWNLOAD_BYTES,
+                            "WebDAV download rejected: file smaller than minimum size"
+                        );
+                        if let Err(e) = tokio::fs::remove_file(&dest).await
+                            && e.kind() != std::io::ErrorKind::NotFound
+                        {
+                            warn!(
+                                error = %e,
+                                id = %next.id,
+                                path = %dest.display(),
+                                "Failed to remove too-small downloaded file"
+                            );
+                        }
+                        last_error = Some(format!(
+                            "downloaded file too small: {} bytes < {} bytes",
+                            size, MIN_READY_DOWNLOAD_BYTES
+                        ));
+                        continue;
+                    }
+
+                    downloaded = Some((path.clone(), size));
                     break;
                 }
                 Err(e) => {
@@ -581,11 +685,7 @@ async fn download_worker_loop(manager: DownloadManager) {
             }
         }
 
-        if let Some(remote_path) = downloaded_from {
-            let size = tokio::fs::metadata(&dest)
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0);
+        if let Some((remote_path, size)) = downloaded {
             if let Err(e) = manager.mark_ready(&next.id, dest.clone(), size).await {
                 error!(error = %e, id = %next.id, "Failed to mark task as ready");
             } else {
@@ -605,8 +705,48 @@ async fn download_worker_loop(manager: DownloadManager) {
                 tried_paths = ?candidate_paths,
                 "WebDAV download failed"
             );
-            if let Err(e) = manager.set_queued(&next.id).await {
-                error!(error = %e, id = %next.id, "Failed to reset queued status");
+
+            // Increment retry count; if exceeded max retries, remove and notify
+            match manager.increment_retry_count(&next.id).await {
+                Ok(count) if count >= MAX_DOWNLOAD_RETRIES => {
+                    error!(
+                        id = %next.id,
+                        path = %next.url_path,
+                        retries = count,
+                        "Max retries exceeded, removing from queue"
+                    );
+                    if let Err(e) = manager.remove_pending(&next.id).await {
+                        error!(error = %e, id = %next.id, "Failed to remove pending download");
+                    }
+
+                    // Send failure notification
+                    let notify_body = format!(
+                        "[ks] Download failed after {} retries\nID: {}\nPath: {}\nFile: {}\nError: {}",
+                        count, next.id, next.url_path, next.file_name, err
+                    );
+                    let http = reqwest::Client::new();
+                    if let Err(e) = http
+                        .post(KK_NOTIFY_URL)
+                        .body(notify_body.clone())
+                        .send()
+                        .await
+                    {
+                        warn!(error = %e, url = KK_NOTIFY_URL, "Failed to send failure notification");
+                    } else {
+                        info!(url = KK_NOTIFY_URL, "Failure notification sent");
+                    }
+                }
+                Ok(count) => {
+                    warn!(
+                        id = %next.id,
+                        retry = count,
+                        max = MAX_DOWNLOAD_RETRIES,
+                        "Will retry download later"
+                    );
+                }
+                Err(e) => {
+                    error!(error = %e, id = %next.id, "Failed to increment retry count");
+                }
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
@@ -615,22 +755,51 @@ async fn download_worker_loop(manager: DownloadManager) {
 
 // ── Handlers: kr.json ────────────────────────────────────────────────────────
 
-async fn get_kr(State(state): State<AppState>) -> Response {
-    let path = state.kr_path();
-    match tokio::fs::read_to_string(&path).await {
-        Ok(content) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            content,
-        )
-            .into_response(),
-        Err(_) => (
+async fn stream_json_file_or_default(path: PathBuf, label: &'static str) -> Response {
+    match tokio::fs::File::open(&path).await {
+        Ok(file) => {
+            let file_len = file.metadata().await.ok().map(|m| m.len());
+            info!(
+                file = label,
+                path = %path.display(),
+                bytes = file_len.unwrap_or(0),
+                "Streaming JSON file"
+            );
+
+            let stream = ReaderStream::new(file);
+            let mut resp = Response::new(Body::from_stream(stream));
+            *resp.status_mut() = StatusCode::OK;
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            );
+            if let Some(file_len) = file_len
+                && let Ok(v) = header::HeaderValue::from_str(&file_len.to_string())
+            {
+                resp.headers_mut().insert(header::CONTENT_LENGTH, v);
+            }
+            resp
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
             "{}".to_string(),
         )
             .into_response(),
+        Err(e) => {
+            error!(
+                error = %e,
+                file = label,
+                path = %path.display(),
+                "Failed to open JSON file"
+            );
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
     }
+}
+
+async fn get_kr(State(state): State<AppState>) -> Response {
+    stream_json_file_or_default(state.kr_path(), "kr.json").await
 }
 
 async fn put_kr(State(state): State<AppState>, body: String) -> Response {
@@ -678,21 +847,7 @@ async fn put_kr(State(state): State<AppState>, body: String) -> Response {
 // ── Handlers: kwa_db.json ────────────────────────────────────────────────────
 
 async fn get_kwa(State(state): State<AppState>) -> Response {
-    let path = state.kwa_path();
-    match tokio::fs::read_to_string(&path).await {
-        Ok(content) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            content,
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            "{}".to_string(),
-        )
-            .into_response(),
-    }
+    stream_json_file_or_default(state.kwa_path(), "kwa_db.json").await
 }
 
 async fn put_kwa(State(state): State<AppState>, body: String) -> Response {
@@ -773,6 +928,52 @@ async fn get_download_webdav_ready(State(state): State<AppState>) -> Response {
     (StatusCode::OK, Json(ready)).into_response()
 }
 
+/// Stream a file with periodic `posix_fadvise(DONTNEED)` hints to prevent
+/// page-cache buildup in cgroup-constrained containers (k3s / Kubernetes).
+///
+/// Uses tokio's native async file I/O for maximum throughput. fadvise is
+/// called every `FADVISE_INTERVAL` bytes as a fire-and-forget background
+/// task so it never blocks the stream.
+#[cfg(unix)]
+fn file_stream_with_fadvise(
+    file: tokio::fs::File,
+) -> impl futures_util::stream::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send {
+    use futures_util::StreamExt;
+
+    let fd = file.as_raw_fd();
+    // 2 MB read buffer – large enough for fast LAN transfers without
+    // excessive memory pinning.
+    const BUF_SIZE: usize = 2 * 1024 * 1024;
+    // Advise the kernel every 32 MB; fine-grained enough to keep page
+    // cache from growing too large, coarse-grained enough to be cheap.
+    const FADVISE_INTERVAL: i64 = 32 * 1024 * 1024;
+
+    let mut bytes_read: i64 = 0;
+    let mut last_advised: i64 = 0;
+
+    ReaderStream::with_capacity(file, BUF_SIZE).map(move |result| {
+        if let Ok(ref chunk) = result {
+            bytes_read += chunk.len() as i64;
+            if bytes_read - last_advised >= FADVISE_INTERVAL {
+                let start = last_advised;
+                let len = bytes_read - last_advised;
+                last_advised = bytes_read;
+                // fadvise is a fast hint syscall; run it without awaiting
+                // so the stream is never stalled waiting for it.
+                tokio::task::spawn_blocking(move || unsafe {
+                    libc::posix_fadvise(
+                        fd,
+                        start,
+                        len as libc::off_t,
+                        libc::POSIX_FADV_DONTNEED,
+                    );
+                });
+            }
+        }
+        result
+    })
+}
+
 async fn get_download_webdav_ready_file(
     Path(id): Path<String>,
     State(state): State<AppState>,
@@ -781,14 +982,35 @@ async fn get_download_webdav_ready_file(
         return err_json(StatusCode::NOT_FOUND, "Ready download not found");
     };
 
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => {
-            let mut resp = Response::new(Body::from(bytes));
+    match tokio::fs::File::open(&path).await {
+        Ok(file) => {
+            let file_len = file.metadata().await.ok().map(|m| m.len());
+            info!(
+                id = %id,
+                file_name = %file_name,
+                path = %path.display(),
+                bytes = file_len.unwrap_or(0),
+                "Streaming ready file"
+            );
+
+            // On Unix, use fadvise(DONTNEED) to prevent page-cache OOM.
+            // On other platforms, fall back to plain ReaderStream.
+            #[cfg(unix)]
+            let body = Body::from_stream(file_stream_with_fadvise(file));
+            #[cfg(not(unix))]
+            let body = Body::from_stream(ReaderStream::new(file));
+
+            let mut resp = Response::new(body);
             *resp.status_mut() = StatusCode::OK;
             resp.headers_mut().insert(
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("application/octet-stream"),
             );
+            if let Some(file_len) = file_len
+                && let Ok(v) = header::HeaderValue::from_str(&file_len.to_string())
+            {
+                resp.headers_mut().insert(header::CONTENT_LENGTH, v);
+            }
             if let Ok(v) = header::HeaderValue::from_str(&format!(
                 "attachment; filename=\"{}\"",
                 file_name.replace('"', "_")
@@ -798,8 +1020,17 @@ async fn get_download_webdav_ready_file(
             resp
         }
         Err(e) => {
-            error!(error = %e, path = %path.display(), "Failed to read ready file");
-            err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            if e.kind() == std::io::ErrorKind::NotFound {
+                warn!(
+                    id = %id,
+                    path = %path.display(),
+                    "Ready file missing on disk"
+                );
+                err_json(StatusCode::NOT_FOUND, "Ready file missing on server")
+            } else {
+                error!(error = %e, path = %path.display(), "Failed to open ready file");
+                err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
         }
     }
 }

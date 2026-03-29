@@ -160,6 +160,8 @@ impl WebDavClient {
     /// Download a remote WebDAV file at `path` to the local `dest` path.
     /// Progress is reported as bytes written to stdout.
     pub async fn download(&self, path: &str, dest: &Path) -> Result<()> {
+        use tokio::io::{AsyncWriteExt, BufWriter};
+
         let url = self.base_url.join(path)?;
         let resp = self.client.get(url).headers(self.headers()).send().await?;
 
@@ -171,15 +173,20 @@ impl WebDavClient {
             std::fs::create_dir_all(parent)?;
         }
 
-        let mut file = tokio::fs::File::create(dest).await?;
+        // Use a 2 MB buffered writer to coalesce many small network chunks
+        // into fewer, larger write syscalls – greatly reduces CPU overhead.
+        const BUF_SIZE: usize = 2 * 1024 * 1024;
+        let file = tokio::fs::File::create(dest).await?;
+        let mut writer = BufWriter::with_capacity(BUF_SIZE, file);
         let mut stream = resp.bytes_stream();
         let mut total: u64 = 0;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             total += chunk.len() as u64;
-            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+            writer.write_all(&chunk).await?;
         }
+        writer.flush().await?;
 
         println!("Downloaded {} bytes -> {:?}", total, dest);
         Ok(())

@@ -201,7 +201,6 @@ impl JavdbScraper {
         let actors = self.extract_actors(&document);
         let tags = self.extract_tags(&document);
         let genres = self.extract_genres(&document);
-        let num = self.extract_number(&document, number)?;
         let releasedate = self.extract_release_date(&document);
         let label = self.extract_label(&document);
 
@@ -215,7 +214,7 @@ impl JavdbScraper {
             actor: actors,
             tag: tags,
             genre: genres,
-            num: Some(num),
+            num: Some(number.to_owned()),
             releasedate,
             cover,
             website: None,

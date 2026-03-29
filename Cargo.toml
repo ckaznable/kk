@@ -17,7 +17,7 @@ dirs = { path = "./packages/dirs" }
 log = "0.4"
 quick-xml = "0.38"
 toml = "0.8"
-reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

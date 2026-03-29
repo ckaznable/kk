@@ -3,11 +3,15 @@ name = "kl"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["browser"]
+browser = ["dep:playwright"]
+
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.12", features = ["cookies", "json"] }
+reqwest = { workspace = true, features = ["cookies"] }
 scraper = "0.22"
 quick-xml = { version = "0.38.4", features = ["serialize"] }
 kr = { path = "../kr" }
@@ -17,7 +21,7 @@ regex = "1.10"
 walkdir = "2.5"
 dirs = { workspace = true }
 tokio = { version = "1", features = ["full"] }
-playwright = "0.0.20"
+playwright = { version = "0.0.20", optional = true }
 async-recursion = "1.1"
 async-trait = "0.1"
 axum = "0.8"

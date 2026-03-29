@@ -24,9 +24,6 @@
 # 使用 debian bookworm 為基底的官方 rust 映像檔 (支援 linux/amd64, linux/arm64 等多種環境)
 FROM docker.io/rust:1.94.0-bookworm AS builder
 
-# 安裝編譯時需要的系統依賴，主要為了 reqwest (OpenSSL) 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /usr/src/app
 
 # 複製整個工作區程式碼
@@ -40,7 +37,7 @@ RUN cargo build -p ks --release
 FROM docker.io/debian:bookworm-slim
 
 # 安裝執行環境依賴 (憑證很重要，因為 kl 在處理 parse 或 request 過程可能會遇到 HTTPS 請求)
-RUN apt-get update && apt-get install -y ca-certificates openssl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

@@ -1,3 +1,4 @@
+#[cfg(feature = "browser")]
 pub mod browser;
 pub mod fc2;
 pub mod javdb;

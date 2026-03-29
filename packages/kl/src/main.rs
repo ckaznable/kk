@@ -58,6 +58,19 @@ async fn sync_kk_cache_from_ks(log_prefix: &str) {
     }
 }
 
+async fn push_local_db_to_ks<F>(log_prefix: &str, label: &'static str, db_name: &str, f: F)
+where
+    F: FnOnce(String) -> anyhow::Result<()> + Send + 'static,
+{
+    if let Some(ref url) = dirs::ks_base_url() {
+        println!("[{}] Syncing {} to ks...", log_prefix, db_name);
+        let url = url.clone();
+        if let Err(e) = run_blocking_sync(label, move || f(url)).await {
+            eprintln!("[{}] Failed to push {} to ks: {}", log_prefix, db_name, e);
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -633,16 +646,10 @@ async fn run_fix_db(
         db.flush();
         println!("Database flushed with {} fixes.", fix_count);
 
-        // Push to ks server if configured
-        if let Some(ref url) = dirs::ks_base_url() {
-            println!("[fix-db] Syncing kr.json to ks...");
-            let url = url.clone();
-            if let Err(e) =
-                run_blocking_sync("push_kr", move || kr::sync::push_kr(&url)).await
-            {
-                eprintln!("[fix-db] Failed to push kr.json to ks: {}", e);
-            }
-        }
+        push_local_db_to_ks("fix-db", "push_kr", "kr.json", |url| {
+            kr::sync::push_kr(&url)
+        })
+        .await;
     } else {
         println!("No changes made.");
     }
@@ -772,6 +779,10 @@ async fn run_webdav_scraper(
 
     db.flush();
     println!("WebDAV database flushed.");
+    push_local_db_to_ks("webdav", "push_kwa", "kwa_db.json", |url| {
+        kr::sync::push_kwa(&url)
+    })
+    .await;
     Ok(())
 }
 

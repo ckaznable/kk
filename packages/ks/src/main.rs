@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -515,7 +516,7 @@ fn normalize_webdav_prefix(prefix: &str) -> String {
 }
 
 fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut raw_candidates = Vec::new();
 
     let normalized_original = original.trim().replace('\\', "/");
     let original_relative = normalized_original.trim_start_matches('/');
@@ -538,8 +539,8 @@ fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> V
             } else {
                 format!("{}/{}", base, remaining_subpath)
             };
-            if !out.iter().any(|p| p == &candidate) {
-                out.push(candidate);
+            if !raw_candidates.iter().any(|p| p == &candidate) {
+                raw_candidates.push(candidate);
             }
         }
     } else if let Some(ref file_name) = file_name {
@@ -550,18 +551,35 @@ fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> V
             } else {
                 format!("{}/{}", base, file_name)
             };
-            if !out.iter().any(|p| p == &candidate) {
-                out.push(candidate);
+            if !raw_candidates.iter().any(|p| p == &candidate) {
+                raw_candidates.push(candidate);
             }
         }
     }
 
     // Original path as fallback
-    if !original.trim().is_empty() && !out.iter().any(|p| p == original) {
-        out.push(original.to_string());
+    if !original.trim().is_empty() && !raw_candidates.iter().any(|p| p == original) {
+        raw_candidates.push(original.to_string());
+    }
+
+    let mut out = Vec::new();
+    for candidate in raw_candidates {
+        if !out.iter().any(|p| p == &candidate) {
+            out.push(candidate.clone());
+        }
+        if let Some(decoded) = decode_webdav_candidate_path(&candidate)
+            && !out.iter().any(|p| p == &decoded)
+        {
+            out.push(decoded);
+        }
     }
 
     out
+}
+
+fn decode_webdav_candidate_path(path: &str) -> Option<String> {
+    let decoded = percent_decode_str(path).decode_utf8().ok()?.into_owned();
+    (decoded != path).then_some(decoded)
 }
 
 fn build_webdav_attempt_url(base_url: &str, path: &str) -> String {
@@ -1598,6 +1616,22 @@ mod tests {
             build_webdav_candidate_paths("/incoming/abc.mp4", &["incoming".to_string()]);
 
         assert_eq!(candidates, vec!["/incoming/abc.mp4".to_string()]);
+    }
+
+    #[test]
+    fn build_webdav_candidate_paths_also_tries_percent_decoded_variants() {
+        let candidates =
+            build_webdav_candidate_paths("/legacy/%5Babc%5D.mp4", &["/mnt/media".to_string()]);
+
+        assert_eq!(
+            candidates,
+            vec![
+                "/mnt/media/%5Babc%5D.mp4".to_string(),
+                "/mnt/media/[abc].mp4".to_string(),
+                "/legacy/%5Babc%5D.mp4".to_string(),
+                "/legacy/[abc].mp4".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

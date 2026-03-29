@@ -8,6 +8,8 @@ use axum::{
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -16,13 +18,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex as AsyncMutex;
+#[cfg(unix)]
+use tokio_util::bytes;
 use tokio_util::io::ReaderStream;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
-#[cfg(unix)]
-use tokio_util::bytes;
 
 // ── Server State ─────────────────────────────────────────────────────────────
 
@@ -891,6 +891,51 @@ async fn put_kwa(State(state): State<AppState>, body: String) -> Response {
     }
 }
 
+// ── Handlers: kk_cache.json ──────────────────────────────────────────────────
+
+async fn get_kk_cache(State(state): State<AppState>) -> Response {
+    let cache = match state.cache.lock() {
+        Ok(cache) => cache,
+        Err(e) => {
+            error!(error = %e, "Failed to lock kk cache");
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to lock kk cache");
+        }
+    };
+
+    match serde_json::to_string(&*cache) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response(),
+        Err(e) => {
+            error!(error = %e, "Failed to serialize kk cache");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    }
+}
+
+async fn put_kk_cache(State(state): State<AppState>, body: String) -> Response {
+    let parsed = match serde_json::from_str::<kl::server::KkCache>(&body) {
+        Ok(v) => v,
+        Err(_) => return err_json(StatusCode::BAD_REQUEST, "Invalid kk_cache JSON"),
+    };
+
+    let mut cache = match state.cache.lock() {
+        Ok(cache) => cache,
+        Err(e) => {
+            error!(error = %e, "Failed to lock kk cache");
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to lock kk cache");
+        }
+    };
+
+    *cache = parsed;
+    cache.flush();
+    info!(bytes = body.len(), file = "kk_cache.json", "Cache updated");
+    ok_json()
+}
+
 // ── Handlers: WebDAV downloads ───────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -961,12 +1006,7 @@ fn file_stream_with_fadvise(
                 // fadvise is a fast hint syscall; run it without awaiting
                 // so the stream is never stalled waiting for it.
                 tokio::task::spawn_blocking(move || unsafe {
-                    libc::posix_fadvise(
-                        fd,
-                        start,
-                        len as libc::off_t,
-                        libc::POSIX_FADV_DONTNEED,
-                    );
+                    libc::posix_fadvise(fd, start, len as libc::off_t, libc::POSIX_FADV_DONTNEED);
                 });
             }
         }
@@ -1179,6 +1219,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/db/kr", get(get_kr).put(put_kr))
         .route("/db/kwa", get(get_kwa).put(put_kwa))
+        .route("/db/kk-cache", get(get_kk_cache).put(put_kk_cache))
         .route("/cache", post(handle_cache))
         .route(
             "/downloads/webdav",

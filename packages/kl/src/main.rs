@@ -64,9 +64,13 @@ enum Commands {
         #[arg(long)]
         test_first: bool,
 
+        /// Fix invalid movie numbers automatically (no value required)
+        #[arg(long)]
+        fix_num: bool,
+
         /// Limit the number of items to fix (and save)
         #[arg(long)]
-        fix_num: Option<usize>,
+        limit: Option<usize>,
 
         /// List items that need fixing without taking action
         #[arg(long)]
@@ -123,10 +127,11 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
             test_first,
             fix_num,
+            limit,
             list_need_fix,
             headless,
         } => {
-            run_fix_db(dry_run, test_first, fix_num, list_need_fix, headless).await?;
+            run_fix_db(dry_run, test_first, fix_num, limit, list_need_fix, headless).await?;
         }
         Commands::Tidy { input, output } => {
             let output_path = output.unwrap_or_else(|| dirs::SEARCH_PATH.to_path_buf());
@@ -239,19 +244,35 @@ fn run_test_scrape(
 async fn run_fix_db(
     dry_run: bool,
     test_first: bool,
-    fix_num: Option<usize>,
+    fix_num: bool,
+    limit: Option<usize>,
     list_need_fix: bool,
     headless: bool,
 ) -> anyhow::Result<()> {
+    // Sync latest kk cache snapshot from ks before scanning/fixing.
+    if let Some(ref url) = dirs::ks_base_url() {
+        println!("[fix-db] ks configured: {}", url);
+        match kr::sync::pull_kk_cache(url) {
+            Ok(true) => println!("[fix-db] Pulled latest kk_cache.json from ks."),
+            Ok(false) => {
+                println!("[fix-db] ks has no kk_cache.json yet, pushing local copy...");
+                if let Err(e) = kr::sync::push_kk_cache(url) {
+                    eprintln!("[fix-db] Failed to push kk_cache.json to ks: {}", e);
+                }
+            }
+            Err(e) => eprintln!("[fix-db] Failed to pull kk_cache.json from ks: {}", e),
+        }
+    }
+
     // Explicitly load DB configuration instead of using default empty init
     let mut db = kr::db::SimpleJsonDatabase::new()
         .map_err(|e| anyhow::anyhow!("Failed to load database: {}", e))?;
     let javdb = kl::javdb::JavdbScraper::new()?;
     let fc2 = kl::fc2::Fc2Scraper::new()?;
 
-    // Initialize browser session if requested (default)
+    // Initialize browser session only when we may actually scrape.
     let mut browser_session = None;
-    let browser_scraper = if !headless {
+    let browser_scraper = if !headless && !list_need_fix {
         let scraper = kl::browser::BrowserScraper::new().await?;
         browser_session = Some(scraper.start_session("https://javdb.com/").await?);
         Some(scraper)
@@ -291,18 +312,27 @@ async fn run_fix_db(
         }
 
         // Fix: if num is purely alphabetic (only letters, no "-"), replace with file stem
-        if let Some(ref num) = movie_num_opt {
-            let is_alpha_only = !num.is_empty()
-                && num.chars().all(|c| c.is_ascii_alphabetic())
-                && !num.contains('-');
-            if is_alpha_only {
-                println!(
-                    "  [Fix Num] '{}' is alpha-only, updating num to file stem '{}'",
-                    num, file_stem_for_id
-                );
-                if !dry_run {
-                    db.config.movies[i].movie.num = Some(file_stem_for_id.clone());
-                    modified = true;
+        if fix_num {
+            if let Some(ref num) = movie_num_opt {
+                let is_alpha_only = !num.is_empty()
+                    && num.chars().all(|c| c.is_ascii_alphabetic())
+                    && !num.contains('-');
+                if is_alpha_only {
+                    println!(
+                        "  [Fix Num] '{}' is alpha-only, updating num to file stem '{}'",
+                        num, file_stem_for_id
+                    );
+                    if !dry_run {
+                        db.config.movies[i].movie.num = Some(file_stem_for_id.clone());
+                        modified = true;
+                        fix_count += 1;
+                        if let Some(max_fixes) = limit {
+                            if fix_count >= max_fixes {
+                                println!("Reached fix limit of {}. Breaking loop.", max_fixes);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -420,9 +450,9 @@ async fn run_fix_db(
 
                         update_nfo_file(&db.config.movies[i]);
 
-                        if let Some(limit) = fix_num {
-                            if fix_count >= limit {
-                                println!("Reached fix limit of {}. Breaking loop.", limit);
+                        if let Some(max_fixes) = limit {
+                            if fix_count >= max_fixes {
+                                println!("Reached fix limit of {}. Breaking loop.", max_fixes);
                                 break;
                             }
                         }
@@ -436,8 +466,8 @@ async fn run_fix_db(
         }
 
         // Check if we broke out of loop in download match
-        if let Some(limit) = fix_num {
-            if fix_count >= limit {
+        if let Some(max_fixes) = limit {
+            if fix_count >= max_fixes {
                 break;
             }
         }
@@ -508,9 +538,9 @@ async fn run_fix_db(
 
                         modified = true;
                         fix_count += 1;
-                        if let Some(limit) = fix_num {
-                            if fix_count >= limit {
-                                println!("Reached fix limit of {}. Breaking loop.", limit);
+                        if let Some(max_fixes) = limit {
+                            if fix_count >= max_fixes {
+                                println!("Reached fix limit of {}. Breaking loop.", max_fixes);
                                 break;
                             }
                         }
@@ -788,8 +818,7 @@ async fn run_pull_ks_downloads(
                     downloaded_bytes += chunk.len() as u64;
 
                     if expected_size > 0 {
-                        let pct =
-                            (downloaded_bytes.saturating_mul(100) / expected_size).min(100);
+                        let pct = (downloaded_bytes.saturating_mul(100) / expected_size).min(100);
                         while pct >= next_progress_pct {
                             println!(
                                 "[pull-ks] [{} / {}] {} progress: {}% ({}/{})",

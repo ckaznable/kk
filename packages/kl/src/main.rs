@@ -234,27 +234,18 @@ fn run_test_scrape(
     async move {
         println!("Testing scrape for ID: {}", id);
 
-        let movie = if !headless {
+        let cookie = cookie.or_else(|| dirs::JAVDB_COOKIE.clone());
+        let javdb = kl::javdb::JavdbScraper::with_cookie(cookie)?;
+        let fc2 = kl::fc2::Fc2Scraper::new()?;
+        let is_fc2 = id.to_uppercase().starts_with("FC2");
+        let movie = if is_fc2 {
+            // FC2 has a dedicated scraper; browser session scraping only supports JavDB.
+            fc2.scrape(&id).await?
+        } else if !headless {
             let scraper = kl::browser::BrowserScraper::new().await?;
-            let is_fc2 = id.to_uppercase().starts_with("FC2");
-            if is_fc2 {
-                return Err(anyhow::anyhow!(
-                    "Browser scraping not yet implemented for FC2"
-                ));
-            }
-
             scraper.scrape_with_interaction(&id, true).await?
         } else {
-            let cookie = cookie.or_else(|| dirs::JAVDB_COOKIE.clone());
-            let javdb = kl::javdb::JavdbScraper::with_cookie(cookie)?;
-            let fc2 = kl::fc2::Fc2Scraper::new()?;
-
-            let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
-                &fc2
-            } else {
-                &javdb
-            };
-            scraper.scrape(&id).await?
+            javdb.scrape(&id).await?
         };
 
         println!("--- Scrape Result ---");
@@ -566,11 +557,15 @@ async fn run_fix_db(
                 println!("  Re-scraping ID: {}", id);
 
                 let scrape_result = if let Some(session) = &browser_session {
-                    browser_scraper
-                        .as_ref()
-                        .unwrap()
-                        .scrape_session(session, &id, !id.to_uppercase().starts_with("FC2"))
-                        .await
+                    if id.to_uppercase().starts_with("FC2") {
+                        fc2.scrape(&id).await
+                    } else {
+                        browser_scraper
+                            .as_ref()
+                            .unwrap()
+                            .scrape_session(session, &id, true)
+                            .await
+                    }
                 } else {
                     let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
                         &fc2
@@ -1195,9 +1190,11 @@ async fn recursive_scan_webdav(
                 Ok(m)
             } else if let Some((scraper, session)) = browser {
                 did_scrape = true;
-                scraper
-                    .scrape_session(session, &num, !num.to_uppercase().starts_with("FC2"))
-                    .await
+                if num.to_uppercase().starts_with("FC2") {
+                    fc2.unwrap().scrape(&num).await
+                } else {
+                    scraper.scrape_session(session, &num, true).await
+                }
             } else {
                 did_scrape = true;
                 let scraper: &dyn Scraper = if num.to_uppercase().starts_with("FC2") {

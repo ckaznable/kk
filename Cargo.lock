@@ -1337,6 +1337,7 @@ dependencies = [
  "futures-util",
  "kr",
  "kwa",
+ "percent-encoding",
  "playwright",
  "quick-xml",
  "regex",

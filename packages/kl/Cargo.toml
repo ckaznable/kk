@@ -25,3 +25,4 @@ playwright = { version = "0.0.20", optional = true }
 async-recursion = "1.1"
 async-trait = "0.1"
 futures-util = "0.3"
+percent-encoding = "2.3"

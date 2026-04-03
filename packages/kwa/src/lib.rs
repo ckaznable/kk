@@ -1,11 +1,25 @@
 use anyhow::{Result, anyhow};
 use base64::prelude::*;
 use futures_util::StreamExt;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use url::Url;
+
+#[cfg(unix)]
+fn evict_file_from_page_cache(file: &tokio::fs::File, path: &Path) {
+    let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    if rc != 0 {
+        log::warn!(
+            "posix_fadvise(DONTNEED) failed for {}: {}",
+            path.display(),
+            std::io::Error::from_raw_os_error(rc)
+        );
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WebDavClient {
@@ -211,6 +225,14 @@ impl WebDavClient {
             }
         }
         writer.flush().await?;
+        let file = writer.into_inner();
+        #[cfg(unix)]
+        {
+            // Flush dirty pages before hinting DONTNEED so the finished
+            // download does not stay hot in page cache until the first reader.
+            file.sync_data().await.ok();
+            evict_file_from_page_cache(&file, dest);
+        }
 
         if total_bytes.is_none() {
             on_progress(total, None);

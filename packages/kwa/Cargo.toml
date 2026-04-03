@@ -18,3 +18,4 @@ base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = "0.3"
 kr = { path = "../kr" }
+libc = "0.2"

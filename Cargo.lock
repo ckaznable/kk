@@ -1399,6 +1399,7 @@ dependencies = [
  "dirs 0.1.0",
  "futures-util",
  "kr",
+ "libc",
  "log",
  "quick-xml",
  "reqwest 0.12.28",

@@ -10,7 +10,7 @@ use axum::{
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -483,6 +483,64 @@ fn format_mib_per_sec(bytes: u64, elapsed: Duration) -> String {
 }
 
 const STREAM_PROGRESS_STEP_PCT: u64 = 5;
+const READY_STREAM_BUF_SIZE: usize = 256 * 1024;
+#[cfg(unix)]
+const READY_STREAM_FADVISE_INTERVAL: i64 = 4 * 1024 * 1024;
+
+#[cfg(unix)]
+fn apply_posix_fadvise(
+    fd: RawFd,
+    offset: i64,
+    len: i64,
+    advice: libc::c_int,
+    advice_name: &'static str,
+    id: &str,
+    file_name: &str,
+    path: &FsPath,
+) {
+    let rc = unsafe { libc::posix_fadvise(fd, offset as libc::off_t, len as libc::off_t, advice) };
+    if rc != 0 {
+        warn!(
+            id = %id,
+            file_name = %file_name,
+            path = %path.display(),
+            offset,
+            len,
+            advice = advice_name,
+            error = %std::io::Error::from_raw_os_error(rc),
+            "posix_fadvise failed"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn prime_ready_file_for_streaming(fd: RawFd, id: &str, file_name: &str, path: &FsPath) {
+    // Ready files are often still hot in page cache right after the background
+    // WebDAV write completes. Drop those cached pages before the first read so
+    // the request itself does not inherit the full cache footprint.
+    apply_posix_fadvise(
+        fd,
+        0,
+        0,
+        libc::POSIX_FADV_DONTNEED,
+        "DONTNEED",
+        id,
+        file_name,
+        path,
+    );
+    // Disable aggressive sequential readahead; in a 128 MiB cgroup the kernel
+    // can otherwise pull in far more data than the client has consumed yet.
+    apply_posix_fadvise(
+        fd,
+        0,
+        0,
+        libc::POSIX_FADV_RANDOM,
+        "RANDOM",
+        id,
+        file_name,
+        path,
+    );
+}
 
 fn sanitize_filename(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
@@ -1175,9 +1233,9 @@ async fn get_download_webdav_ready(State(state): State<AppState>) -> Response {
 /// Stream a file with periodic `posix_fadvise(DONTNEED)` hints to prevent
 /// page-cache buildup in cgroup-constrained containers (k3s / Kubernetes).
 ///
-/// Uses tokio's native async file I/O for maximum throughput. fadvise is
-/// called every `FADVISE_INTERVAL` bytes as a fire-and-forget background
-/// task so it never blocks the stream.
+/// The fd is primed before the first read and then trimmed in small ranges as
+/// the client consumes data, so ready-file requests do not inherit a large hot
+/// cache footprint from the preceding WebDAV download.
 #[cfg(unix)]
 fn file_stream_with_fadvise(
     file: tokio::fs::File,
@@ -1189,14 +1247,7 @@ fn file_stream_with_fadvise(
     use futures_util::StreamExt;
 
     let fd = file.as_raw_fd();
-    // 2 MB read buffer – large enough for fast LAN transfers without
-    // excessive memory pinning.
-    const BUF_SIZE: usize = 2 * 1024 * 1024;
-    // Advise the kernel every 32 MB; fine-grained enough to keep page
-    // cache from growing too large, coarse-grained enough to be cheap.
-    const FADVISE_INTERVAL: i64 = 32 * 1024 * 1024;
-
-    let inner = ReaderStream::with_capacity(file, BUF_SIZE);
+    let inner = ReaderStream::with_capacity(file, READY_STREAM_BUF_SIZE);
     let started_at = Instant::now();
 
     futures_util::stream::unfold(
@@ -1234,20 +1285,20 @@ fn file_stream_with_fadvise(
                                         next_progress_pct += STREAM_PROGRESS_STEP_PCT;
                                     }
                                 }
-                                if bytes_read - last_advised >= FADVISE_INTERVAL {
+                                if bytes_read - last_advised >= READY_STREAM_FADVISE_INTERVAL {
                                     let start = last_advised;
                                     let len = bytes_read - last_advised;
                                     last_advised = bytes_read;
-                                    // fadvise is a fast hint syscall; run it without awaiting
-                                    // so the stream is never stalled waiting for it.
-                                    tokio::task::spawn_blocking(move || unsafe {
-                                        libc::posix_fadvise(
-                                            fd,
-                                            start,
-                                            len as libc::off_t,
-                                            libc::POSIX_FADV_DONTNEED,
-                                        );
-                                    });
+                                    apply_posix_fadvise(
+                                        fd,
+                                        start,
+                                        len,
+                                        libc::POSIX_FADV_DONTNEED,
+                                        "DONTNEED",
+                                        &id,
+                                        &file_name,
+                                        &path,
+                                    );
                                 }
                             }
                             Err(err) => {
@@ -1269,6 +1320,18 @@ fn file_stream_with_fadvise(
                         Some((result, (inner, bytes_read, last_advised, started_at, next_progress_pct)))
                     }
                     None => {
+                        if bytes_read > last_advised {
+                            apply_posix_fadvise(
+                                fd,
+                                last_advised,
+                                bytes_read - last_advised,
+                                libc::POSIX_FADV_DONTNEED,
+                                "DONTNEED",
+                                &id,
+                                &file_name,
+                                &path,
+                            );
+                        }
                         let streamed_bytes = bytes_read.max(0) as u64;
                         let elapsed = started_at.elapsed();
                         info!(
@@ -1299,8 +1362,7 @@ fn file_stream_plain(
 ) -> impl futures_util::stream::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send {
     use futures_util::StreamExt;
 
-    const BUF_SIZE: usize = 2 * 1024 * 1024;
-    let inner = ReaderStream::with_capacity(file, BUF_SIZE);
+    let inner = ReaderStream::with_capacity(file, READY_STREAM_BUF_SIZE);
     let started_at = Instant::now();
 
     futures_util::stream::unfold(
@@ -1389,6 +1451,8 @@ async fn get_download_webdav_ready_file(
     match tokio::fs::File::open(&path).await {
         Ok(file) => {
             let file_len = file.metadata().await.ok().map(|m| m.len());
+            #[cfg(unix)]
+            prime_ready_file_for_streaming(file.as_raw_fd(), &id, &file_name, &path);
             info!(
                 id = %id,
                 file_name = %file_name,

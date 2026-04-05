@@ -1,5 +1,7 @@
 use dirs::SEARCH_PATH;
 use enclose::enclose;
+#[cfg(not(target_os = "linux"))]
+use fltk::window::GlWindow;
 use fltk::{
     app,
     enums::{Color, Cursor, Event, Key},
@@ -8,8 +10,6 @@ use fltk::{
     prelude::{GroupExt, WidgetBase, WidgetExt, WindowExt},
     window::Window,
 };
-#[cfg(not(target_os = "linux"))]
-use fltk::window::GlWindow;
 use libmpv2::Mpv;
 use serde_json::json;
 use std::{

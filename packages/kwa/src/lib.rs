@@ -1,11 +1,11 @@
 use anyhow::{Result, anyhow};
 use base64::prelude::*;
 use futures_util::StreamExt;
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use url::Url;
 

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -57,6 +57,35 @@ struct ApiErr {
     error: String,
 }
 
+#[derive(Deserialize)]
+struct KrNumberExistsQuery {
+    number: String,
+}
+
+#[derive(Serialize)]
+struct KrNumberExistsResponse {
+    ok: bool,
+    exists: bool,
+    number: String,
+}
+
+#[derive(Default, Deserialize)]
+struct KrLookupConfig {
+    #[serde(default)]
+    movies: Vec<KrLookupMovieData>,
+}
+
+#[derive(Deserialize)]
+struct KrLookupMovieData {
+    movie: KrLookupMovie,
+}
+
+#[derive(Deserialize)]
+struct KrLookupMovie {
+    #[serde(default)]
+    num: Option<String>,
+}
+
 fn ok_json() -> Response {
     (StatusCode::OK, Json(ApiOk { ok: true })).into_response()
 }
@@ -70,6 +99,25 @@ fn err_json(status: StatusCode, msg: impl ToString) -> Response {
         }),
     )
         .into_response()
+}
+
+fn normalize_number(number: &str) -> String {
+    number.trim().to_uppercase().replace(['-', '_'], "")
+}
+
+fn kr_config_contains_number(config: &KrLookupConfig, number: &str) -> bool {
+    let needle = normalize_number(number);
+    if needle.is_empty() {
+        return false;
+    }
+
+    config.movies.iter().any(|item| {
+        item.movie
+            .num
+            .as_deref()
+            .map(normalize_number)
+            .is_some_and(|num| num == needle)
+    })
 }
 
 // ── Size guard helper ────────────────────────────────────────────────────────
@@ -809,8 +857,7 @@ async fn download_worker_loop(manager: DownloadManager) {
             match client
                 .download_with_progress(path, &dest, |written_bytes, total_bytes| {
                     let elapsed_secs = started_at.elapsed().as_secs_f64().max(0.001);
-                    let avg_mib_per_sec =
-                        written_bytes as f64 / (1024.0 * 1024.0) / elapsed_secs;
+                    let avg_mib_per_sec = written_bytes as f64 / (1024.0 * 1024.0) / elapsed_secs;
 
                     if let Some(total_bytes) = total_bytes {
                         let progress_pct =
@@ -1059,6 +1106,59 @@ async fn get_kr(State(state): State<AppState>) -> Response {
     stream_json_file_or_default(state.kr_path(), "kr.json").await
 }
 
+async fn get_kr_number_exists(
+    State(state): State<AppState>,
+    Query(query): Query<KrNumberExistsQuery>,
+) -> Response {
+    let number = query.number.trim();
+    if number.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "Missing number");
+    }
+
+    let path = state.kr_path();
+    let body = match tokio::fs::read_to_string(&path).await {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::OK,
+                Json(KrNumberExistsResponse {
+                    ok: true,
+                    exists: false,
+                    number: number.to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                file = "kr.json",
+                path = %path.display(),
+                "Failed to read kr.json for number lookup"
+            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    };
+
+    let config = match serde_json::from_str::<KrLookupConfig>(&body) {
+        Ok(config) => config,
+        Err(e) => {
+            error!(error = %e, file = "kr.json", "Invalid kr.json payload");
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Invalid kr.json");
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(KrNumberExistsResponse {
+            ok: true,
+            exists: kr_config_contains_number(&config, number),
+            number: number.to_string(),
+        }),
+    )
+        .into_response()
+}
+
 async fn put_kr(State(state): State<AppState>, body: String) -> Response {
     let path = state.kr_path();
 
@@ -1267,8 +1367,8 @@ fn file_stream_with_fadvise(
                                     && expected_bytes > 0
                                 {
                                     let streamed_bytes = bytes_read.max(0) as u64;
-                                    let pct =
-                                        (streamed_bytes.saturating_mul(100) / expected_bytes).min(100);
+                                    let pct = (streamed_bytes.saturating_mul(100) / expected_bytes)
+                                        .min(100);
                                     while pct >= next_progress_pct {
                                         let elapsed = started_at.elapsed();
                                         info!(
@@ -1317,7 +1417,16 @@ fn file_stream_with_fadvise(
                             }
                         }
 
-                        Some((result, (inner, bytes_read, last_advised, started_at, next_progress_pct)))
+                        Some((
+                            result,
+                            (
+                                inner,
+                                bytes_read,
+                                last_advised,
+                                started_at,
+                                next_progress_pct,
+                            ),
+                        ))
                     }
                     None => {
                         if bytes_read > last_advised {
@@ -1381,8 +1490,9 @@ fn file_stream_plain(
                                 if let Some(expected_bytes) = expected_bytes
                                     && expected_bytes > 0
                                 {
-                                    let pct =
-                                        (next_bytes_read.saturating_mul(100) / expected_bytes).min(100);
+                                    let pct = (next_bytes_read.saturating_mul(100)
+                                        / expected_bytes)
+                                        .min(100);
                                     while pct >= next_progress_pct {
                                         let elapsed = started_at.elapsed();
                                         info!(
@@ -1418,7 +1528,10 @@ fn file_stream_plain(
                             }
                         };
 
-                        Some((result, (inner, next_bytes_read, started_at, next_progress_pct)))
+                        Some((
+                            result,
+                            (inner, next_bytes_read, started_at, next_progress_pct),
+                        ))
                     }
                     None => {
                         let elapsed = started_at.elapsed();
@@ -1658,6 +1771,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/db/kr", get(get_kr).put(put_kr))
+        .route("/db/kr/exists", get(get_kr_number_exists))
         .route("/db/kwa", get(get_kwa).put(put_kwa))
         .route("/db/kk-cache", get(get_kk_cache).put(put_kk_cache))
         .route("/cache", post(handle_cache))
@@ -1797,5 +1911,33 @@ mod tests {
         drop(state);
 
         let _ = tokio::fs::remove_dir_all(base).await;
+    }
+
+    #[test]
+    fn kr_config_contains_number_matches_normalized_numbers() {
+        let config = KrLookupConfig {
+            movies: vec![
+                KrLookupMovieData {
+                    movie: KrLookupMovie {
+                        num: Some("SSIS-123".to_string()),
+                    },
+                },
+                KrLookupMovieData {
+                    movie: KrLookupMovie {
+                        num: Some("fc2_ppv_4567890".to_string()),
+                    },
+                },
+            ],
+        };
+
+        assert!(kr_config_contains_number(&config, "ssis123"));
+        assert!(kr_config_contains_number(&config, "FC2-PPV-4567890"));
+        assert!(!kr_config_contains_number(&config, "IPZZ-001"));
+    }
+
+    #[test]
+    fn kr_config_contains_number_rejects_blank_query() {
+        let config = KrLookupConfig::default();
+        assert!(!kr_config_contains_number(&config, "   "));
     }
 }

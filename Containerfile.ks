@@ -40,8 +40,10 @@ RUN cargo build -p ks --release
 # 使用與 builder 相同的 Debian 系統基底，保證 C standard library (libc) 相容，且檔案極小化支援 ARM
 FROM docker.io/debian:bookworm-slim
 
-# 安裝執行環境依賴 (憑證很重要，因為 kl 在處理 parse 或 request 過程可能會遇到 HTTPS 請求)
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# 安裝執行環境依賴 (憑證很重要；curl 供 WebDAV 異常時做最後 fallback)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

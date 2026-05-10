@@ -169,7 +169,7 @@ struct QueuedDownload {
     retry_count: u32,
 }
 
-const MAX_DOWNLOAD_RETRIES: u32 = 5;
+const MAX_DOWNLOAD_RETRIES: u32 = 3;
 const KK_NOTIFY_URL: &str = "http://ntfy-service.ntfy.svc.cluster.local/kk";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -621,6 +621,12 @@ fn normalize_webdav_prefix(prefix: &str) -> String {
     p
 }
 
+fn has_url_encoded_bytes(path: &str) -> bool {
+    path.as_bytes().windows(3).any(|window| {
+        window[0] == b'%' && window[1].is_ascii_hexdigit() && window[2].is_ascii_hexdigit()
+    })
+}
+
 fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> Vec<String> {
     let mut raw_candidates = Vec::new();
 
@@ -684,13 +690,16 @@ fn build_webdav_candidate_paths(original: &str, source_prefixes: &[String]) -> V
 }
 
 fn decode_webdav_candidate_path(path: &str) -> Option<String> {
+    if !has_url_encoded_bytes(path) {
+        return None;
+    }
     let decoded = percent_decode_str(path).decode_utf8().ok()?.into_owned();
     (decoded != path).then_some(decoded)
 }
 
 fn build_webdav_attempt_url(base_url: &str, path: &str) -> String {
     reqwest::Url::parse(base_url)
-        .and_then(|url| url.join(path))
+        .and_then(|url| url.join(&kwa::encode_webdav_path_for_url(path)))
         .map(|url| url.to_string())
         .unwrap_or_else(|_| format!("{} :: {}", base_url, path))
 }

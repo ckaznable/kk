@@ -1402,6 +1402,7 @@ dependencies = [
  "kr",
  "libc",
  "log",
+ "percent-encoding",
  "quick-xml",
  "reqwest 0.12.28",
  "serde",

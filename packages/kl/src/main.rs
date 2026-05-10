@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use kl::Scraper;
+use percent_encoding::percent_decode_str;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,12 @@ use std::{
 };
 use tokio::io::{AsyncWriteExt, BufWriter};
 use walkdir::WalkDir;
+
+fn has_url_encoded_bytes(path: &str) -> bool {
+    path.as_bytes().windows(3).any(|window| {
+        window[0] == b'%' && window[1].is_ascii_hexdigit() && window[2].is_ascii_hexdigit()
+    })
+}
 
 fn format_mib_per_sec(bytes: u64, elapsed: Duration) -> String {
     let secs = elapsed.as_secs_f64();
@@ -114,6 +121,10 @@ enum Commands {
         #[arg(short, long)]
         cookie: Option<String>,
 
+        /// Use browser scraper for JavDB metadata
+        #[arg(long, conflicts_with = "headless")]
+        browser: bool,
+
         /// Use legacy headless HTTP scraper (no browser)
         #[arg(long)]
         headless: bool,
@@ -202,9 +213,10 @@ async fn main() -> anyhow::Result<()> {
             path,
             list_only,
             cookie,
+            browser,
             headless,
         } => {
-            run_webdav_scraper(url, user, pass, path, list_only, cookie, headless).await?;
+            run_webdav_scraper(url, user, pass, path, list_only, cookie, browser, headless).await?;
         }
         Commands::TestScrape {
             id,
@@ -672,6 +684,7 @@ async fn run_webdav_scraper(
     remote_path: String,
     list_only: bool,
     cookie: Option<String>,
+    browser: bool,
     headless: bool,
 ) -> anyhow::Result<()> {
     sync_kk_cache_from_ks("webdav").await;
@@ -742,9 +755,9 @@ async fn run_webdav_scraper(
     let fc2 = kl::fc2::Fc2Scraper::new()?;
     let cache_dir = &*dirs::THUMB_CACHE_DIR;
 
-    // Initialize browser session if requested (default)
+    // Initialize browser session only when explicitly requested.
     let mut browser_session = None;
-    let browser_scraper = if !headless {
+    let browser_scraper = if browser && !headless {
         let scraper = kl::browser::BrowserScraper::new().await?;
         browser_session = Some(scraper.start_session("https://javdb.com/").await?);
         Some(scraper)
@@ -1119,6 +1132,11 @@ async fn recursive_scan_webdav(
         let mut res_path = res.path.clone();
         if let Ok(url) = reqwest::Url::parse(&res_path) {
             res_path = url.path().to_string();
+        }
+        if has_url_encoded_bytes(&res_path) {
+            if let Ok(decoded) = percent_decode_str(&res_path).decode_utf8() {
+                res_path = decoded.into_owned();
+            }
         }
 
         let p = std::path::Path::new(&res_path);

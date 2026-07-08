@@ -24,6 +24,33 @@ pub static WEBDAV_USER: LazyLock<Option<String>> =
 pub static WEBDAV_PASS: LazyLock<Option<String>> =
     LazyLock::new(|| env::var("KK_WEBDAV_PASS").ok());
 
+/// PikPak account credentials for direct drive-API downloads. Fall back to
+/// the WebDAV credentials since PikPak's WebDAV uses the same account.
+pub static PIKPAK_USER: LazyLock<Option<String>> = LazyLock::new(|| {
+    env::var("KK_PIKPAK_USER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| WEBDAV_USER.clone())
+});
+pub static PIKPAK_PASS: LazyLock<Option<String>> = LazyLock::new(|| {
+    env::var("KK_PIKPAK_PASS")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| WEBDAV_PASS.clone())
+});
+
+/// Whether ks should try the PikPak drive API before falling back to WebDAV.
+/// Enabled by default; set `KK_PIKPAK_API=0` to disable.
+pub fn pikpak_api_enabled() -> bool {
+    match env::var("KK_PIKPAK_API") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
 pub static JAVDB_COOKIE: LazyLock<Option<String>> =
     LazyLock::new(|| env::var("KK_JAVDB_COOKIE").ok());
 

@@ -697,6 +697,35 @@ fn decode_webdav_candidate_path(path: &str) -> Option<String> {
     (decoded != path).then_some(decoded)
 }
 
+/// Candidate drive paths for PikPak API resolution: the percent-decoded WebDAV
+/// candidates (the API needs real file names), plus the original path with its
+/// first segment stripped to cover gateways that mount the drive under an
+/// extra prefix.
+fn api_candidate_paths(original: &str, candidates: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |path: String| {
+        if !path.trim().is_empty() && !out.iter().any(|p| p == &path) {
+            out.push(path);
+        }
+    };
+
+    for candidate in candidates {
+        let decoded = decode_webdav_candidate_path(candidate).unwrap_or_else(|| candidate.clone());
+        push(decoded);
+    }
+
+    let normalized_original = original.trim().replace('\\', "/");
+    let decoded_original =
+        decode_webdav_candidate_path(&normalized_original).unwrap_or(normalized_original);
+    if let Some((_, rest)) = decoded_original.trim_start_matches('/').split_once('/')
+        && !rest.is_empty()
+    {
+        push(format!("/{rest}"));
+    }
+
+    out
+}
+
 fn build_webdav_attempt_url(base_url: &str, path: &str) -> String {
     reqwest::Url::parse(base_url)
         .and_then(|url| url.join(&kwa::encode_webdav_path_for_url(path)))
@@ -746,8 +775,34 @@ async fn send_ks_notification(
     }
 }
 
+fn build_pikpak_client() -> Option<kwa::pikpak::PikPakClient> {
+    if !dirs::pikpak_api_enabled() {
+        info!("PikPak API downloads disabled via KK_PIKPAK_API");
+        return None;
+    }
+    let (Some(user), Some(pass)) = (dirs::PIKPAK_USER.clone(), dirs::PIKPAK_PASS.clone()) else {
+        info!(
+            "PikPak API credentials not configured (KK_PIKPAK_USER/KK_PIKPAK_PASS \
+             or KK_WEBDAV_USER/KK_WEBDAV_PASS); downloads use WebDAV only"
+        );
+        return None;
+    };
+
+    match kwa::pikpak::PikPakClient::new(&user, &pass) {
+        Ok(client) => {
+            info!(user = %user, "PikPak API downloads enabled; API is tried before WebDAV");
+            Some(client)
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to init PikPak API client; downloads use WebDAV only");
+            None
+        }
+    }
+}
+
 async fn download_worker_loop(manager: DownloadManager) {
     let mut client_pool: HashMap<WebDavClientKey, kwa::WebDavClient> = HashMap::new();
+    let pikpak_client = build_pikpak_client();
 
     loop {
         let next = match manager.pop_next_queued_mark_downloading().await {
@@ -849,7 +904,147 @@ async fn download_worker_loop(manager: DownloadManager) {
 
         let mut downloaded: Option<(String, u64)> = None;
         let mut last_error: Option<String> = None;
+
+        // Preferred path: resolve the file on the PikPak drive API and download
+        // from its signed CDN link (same flow as rclone). Fall back to the
+        // WebDAV gateway below when the API cannot deliver the file.
+        if let Some(pikpak) = pikpak_client.as_ref() {
+            let api_paths = api_candidate_paths(&next.url_path, &candidate_paths);
+            info!(
+                id = %next.id,
+                path = %next.url_path,
+                candidate_count = api_paths.len(),
+                candidates = ?api_paths,
+                "Trying PikPak API download before WebDAV"
+            );
+
+            for (attempt_idx, path) in api_paths.iter().enumerate() {
+                let started_at = Instant::now();
+                info!(
+                    id = %next.id,
+                    attempt = attempt_idx + 1,
+                    total_attempts = api_paths.len(),
+                    original_path = %next.url_path,
+                    candidate_path = %path,
+                    dest = %dest.display(),
+                    "Attempting PikPak API download candidate"
+                );
+
+                let result = pikpak
+                    .download_with_progress(path, &dest, |written_bytes, total_bytes| {
+                        let elapsed_secs = started_at.elapsed().as_secs_f64().max(0.001);
+                        let avg_mib_per_sec =
+                            written_bytes as f64 / (1024.0 * 1024.0) / elapsed_secs;
+                        let progress_pct = total_bytes
+                            .map(|total| {
+                                ((written_bytes.saturating_mul(100)) / total.max(1)).min(100)
+                            })
+                            .unwrap_or(0);
+                        info!(
+                            id = %next.id,
+                            attempt = attempt_idx + 1,
+                            total_attempts = api_paths.len(),
+                            path = %path,
+                            dest = %dest.display(),
+                            progress_pct,
+                            downloaded_bytes = written_bytes,
+                            total_bytes = total_bytes.unwrap_or(0),
+                            elapsed_secs = format!("{elapsed_secs:.2}"),
+                            avg_mib_per_sec = format!("{avg_mib_per_sec:.2}"),
+                            "PikPak API download progress"
+                        );
+                    })
+                    .await;
+
+                match result {
+                    Ok(_) => {
+                        let size = match tokio::fs::metadata(&dest).await {
+                            Ok(m) => m.len(),
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    id = %next.id,
+                                    attempt = attempt_idx + 1,
+                                    total_attempts = api_paths.len(),
+                                    path = %path,
+                                    dest = %dest.display(),
+                                    "PikPak API downloaded file metadata check failed"
+                                );
+                                last_error =
+                                    Some(format!("pikpak_api metadata check failed: {}", e));
+                                continue;
+                            }
+                        };
+
+                        if size < MIN_READY_DOWNLOAD_BYTES {
+                            warn!(
+                                id = %next.id,
+                                attempt = attempt_idx + 1,
+                                total_attempts = api_paths.len(),
+                                path = %path,
+                                dest = %dest.display(),
+                                bytes = size,
+                                min_bytes = MIN_READY_DOWNLOAD_BYTES,
+                                "PikPak API download rejected: file smaller than minimum size"
+                            );
+                            if let Err(e) = tokio::fs::remove_file(&dest).await
+                                && e.kind() != std::io::ErrorKind::NotFound
+                            {
+                                warn!(
+                                    error = %e,
+                                    id = %next.id,
+                                    path = %dest.display(),
+                                    "Failed to remove too-small downloaded file"
+                                );
+                            }
+                            last_error = Some(format!(
+                                "pikpak_api downloaded file too small: {} bytes < {} bytes",
+                                size, MIN_READY_DOWNLOAD_BYTES
+                            ));
+                            continue;
+                        }
+
+                        downloaded = Some((path.clone(), size));
+                        info!(
+                            id = %next.id,
+                            attempt = attempt_idx + 1,
+                            total_attempts = api_paths.len(),
+                            path = %path,
+                            dest = %dest.display(),
+                            bytes = size,
+                            "PikPak API download candidate succeeded"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            id = %next.id,
+                            attempt = attempt_idx + 1,
+                            total_attempts = api_paths.len(),
+                            original_path = %next.url_path,
+                            path = %path,
+                            dest = %dest.display(),
+                            "PikPak API download attempt failed"
+                        );
+                        last_error = Some(format!("pikpak_api {}: {}", path, e));
+                    }
+                }
+            }
+
+            if downloaded.is_none() {
+                warn!(
+                    id = %next.id,
+                    path = %next.url_path,
+                    "All PikPak API download attempts failed; falling back to WebDAV"
+                );
+            }
+        }
+
         for (attempt_idx, path) in candidate_paths.iter().enumerate() {
+            if downloaded.is_some() {
+                break;
+            }
             let remote_url = build_webdav_attempt_url(&next.source_base_url, path);
             let started_at = Instant::now();
             info!(
@@ -1857,6 +2052,36 @@ mod tests {
                 "/mnt/media/[abc].mp4".to_string(),
                 "/legacy/%5Babc%5D.mp4".to_string(),
                 "/legacy/[abc].mp4".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn api_candidate_paths_decodes_and_dedupes() {
+        let candidates =
+            build_webdav_candidate_paths("/legacy/%5Babc%5D.mp4", &["/mnt/media".to_string()]);
+        let api = api_candidate_paths("/legacy/%5Babc%5D.mp4", &candidates);
+
+        assert_eq!(
+            api,
+            vec![
+                "/mnt/media/[abc].mp4".to_string(),
+                "/legacy/[abc].mp4".to_string(),
+                "/[abc].mp4".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn api_candidate_paths_adds_first_segment_stripped_variant() {
+        let candidates = build_webdav_candidate_paths("/pikpak/new/abc.mp4", &Vec::<String>::new());
+        let api = api_candidate_paths("/pikpak/new/abc.mp4", &candidates);
+
+        assert_eq!(
+            api,
+            vec![
+                "/pikpak/new/abc.mp4".to_string(),
+                "/new/abc.mp4".to_string()
             ]
         );
     }

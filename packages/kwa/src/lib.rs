@@ -1,3 +1,5 @@
+pub mod pikpak;
+
 use anyhow::{Result, anyhow};
 use base64::prelude::*;
 use futures_util::StreamExt;
@@ -11,11 +13,11 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use url::Url;
 
-const DOWNLOAD_WRITE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+pub(crate) const DOWNLOAD_WRITE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
 const RANGE_FALLBACK_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 
 #[cfg(unix)]
-fn evict_file_from_page_cache(file: &tokio::fs::File, path: &Path) {
+pub(crate) fn evict_file_from_page_cache(file: &tokio::fs::File, path: &Path) {
     let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
     if rc != 0 {
         log::warn!(
@@ -26,7 +28,7 @@ fn evict_file_from_page_cache(file: &tokio::fs::File, path: &Path) {
     }
 }
 
-fn temp_download_path(dest: &Path) -> PathBuf {
+pub(crate) fn temp_download_path(dest: &Path) -> PathBuf {
     let file_name = dest
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -34,7 +36,7 @@ fn temp_download_path(dest: &Path) -> PathBuf {
     dest.with_file_name(format!("{file_name}.part"))
 }
 
-async fn cleanup_partial_download(path: &Path) {
+pub(crate) async fn cleanup_partial_download(path: &Path) {
     if let Err(e) = tokio::fs::remove_file(path).await
         && e.kind() != std::io::ErrorKind::NotFound
     {

@@ -49,6 +49,8 @@ pub struct MovieData {
     pub added_time: SystemTime,
     pub fav: bool,
     #[serde(default)]
+    pub is_sd: Option<bool>,
+    #[serde(default)]
     pub markers: Vec<f64>,
 }
 
@@ -296,6 +298,7 @@ impl SimpleJsonDatabase {
             movie,
             added_time,
             fav: false,
+            is_sd: None,
             markers: Vec::new(),
         })
     }

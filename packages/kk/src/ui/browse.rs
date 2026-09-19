@@ -58,6 +58,7 @@ pub struct RenderItem {
     pub num: Option<String>, // Movie number / ID for fallback display
     pub index: u32,
     pub fav: bool,
+    pub is_sd: bool,
 }
 
 impl TryFrom<IndexedMovieData<'_>> for RenderItem {
@@ -72,6 +73,7 @@ impl TryFrom<IndexedMovieData<'_>> for RenderItem {
             num: value.movie.movie.num.clone(),
             index: value.index,
             fav: value.movie.fav,
+            is_sd: value.movie.is_sd.unwrap_or(false),
         })
     }
 }
@@ -86,6 +88,7 @@ impl From<(usize, &kr::db::WebDavMovieData)> for RenderItem {
             num: data.movie.num.clone(),
             index: index as u32,
             fav: data.fav,
+            is_sd: false,
         }
     }
 }
@@ -98,6 +101,7 @@ impl MenuItem {
 
         let full_txt = item.title.clone();
         let is_fav = item.fav;
+        let is_sd = item.is_sd;
         // Fallback label: prefer movie num, otherwise use title
         let fallback_label = item.num.clone().unwrap_or_else(|| item.title.clone());
 
@@ -130,6 +134,9 @@ impl MenuItem {
                             heart_size,
                             Align::Center,
                         );
+                    }
+                    if is_sd {
+                        Self::draw_sd_badge(img_x, img_y);
                     }
 
                     draw::set_draw_color(Color::White);
@@ -192,6 +199,9 @@ impl MenuItem {
                             Align::Center,
                         );
                     }
+                    if is_sd {
+                        Self::draw_sd_badge(img_x, img_y);
+                    }
 
                     draw::set_draw_color(Color::White);
                     draw::set_font(Font::Helvetica, 14);
@@ -212,6 +222,16 @@ impl MenuItem {
         }
 
         g.end();
+    }
+
+    fn draw_sd_badge(x: i32, y: i32) {
+        const WIDTH: i32 = 34;
+        const HEIGHT: i32 = 20;
+        draw::set_draw_color(Color::from_rgb(220, 53, 69));
+        draw::draw_rect_fill(x + 5, y + 5, WIDTH, HEIGHT, Color::from_rgb(220, 53, 69));
+        draw::set_draw_color(Color::White);
+        draw::set_font(Font::HelveticaBold, 12);
+        draw::draw_text2("SD", x + 5, y + 5, WIDTH, HEIGHT, Align::Center);
     }
 
     /// Render up to two lines of title text, truncating with "..." if needed.

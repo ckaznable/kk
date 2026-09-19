@@ -196,6 +196,13 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Mark local database videos below 1080p as SD quality
+    ScanQuality {
+        /// Show detected quality without modifying kr.json
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -216,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tidy { input, output } => {
             let output_path = output.unwrap_or_else(|| dirs::SEARCH_PATH.to_path_buf());
             run_scraper(input, output_path).await?;
+            run_scan_quality(false).await?;
         }
         Commands::Webdav {
             url,
@@ -243,6 +251,9 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let output_path = output.unwrap_or_else(|| dirs::SEARCH_PATH.to_path_buf());
             run_pull_ks_downloads(url, output_path, dry_run).await?;
+        }
+        Commands::ScanQuality { dry_run } => {
+            run_scan_quality(dry_run).await?;
         }
     }
     Ok(())
@@ -707,6 +718,102 @@ async fn download_file(url: &str, path: &PathBuf) -> anyhow::Result<()> {
     let bytes = reqwest::get(url).await?.bytes().await?;
     let mut file = fs::File::create(path)?;
     file.write_all(&bytes)?;
+    Ok(())
+}
+
+const VIDEO_EXTENSIONS: [&str; 11] = [
+    "mp4", "mkv", "avi", "rmvb", "wmv", "mov", "flv", "webm", "ts", "m4v", "3gp",
+];
+
+fn local_video_path(movie: &kr::db::MovieData) -> Option<PathBuf> {
+    let nfo_path = movie.abs_path();
+    let parent = nfo_path.parent()?;
+    let stem = nfo_path.file_stem()?.to_str()?;
+
+    VIDEO_EXTENSIONS
+        .iter()
+        .map(|ext| parent.join(format!("{stem}.{ext}")))
+        .find(|path| path.is_file())
+}
+
+fn video_height(path: &Path) -> anyhow::Result<u32> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run ffprobe: {e}"))?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "ffprobe failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    String::from_utf8(output.stdout)
+        .map_err(anyhow::Error::from)?
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("ffprobe returned an invalid video height: {e}"))
+}
+
+async fn run_scan_quality(dry_run: bool) -> anyhow::Result<()> {
+    let mut db = kr::db::SimpleJsonDatabase::new()
+        .map_err(|e| anyhow::anyhow!("Failed to load database: {e}"))?;
+    let mut scanned = 0usize;
+    let mut skipped = 0usize;
+    let mut sd_count = 0usize;
+    let mut changed = 0usize;
+
+    for movie in &mut db.config.movies {
+        if movie.is_sd.is_some() {
+            skipped += 1;
+            continue;
+        }
+        let Some(video_path) = local_video_path(movie) else {
+            eprintln!("[scan-quality] Video not found for {:?}", movie.abs_path());
+            continue;
+        };
+        let height = match video_height(&video_path) {
+            Ok(height) => height,
+            Err(e) => {
+                eprintln!("[scan-quality] Failed to inspect {:?}: {e}", video_path);
+                continue;
+            }
+        };
+
+        scanned += 1;
+        let is_sd = height < 1080;
+        if is_sd {
+            sd_count += 1;
+        }
+        println!("[scan-quality] {}p {}", height, video_path.display());
+
+        changed += 1;
+        if !dry_run {
+            movie.is_sd = Some(is_sd);
+        }
+    }
+
+    println!(
+        "[scan-quality] scanned={scanned}, skipped={skipped}, sd={sd_count}, changed={changed}, dry_run={dry_run}"
+    );
+    if changed > 0 && !dry_run {
+        db.flush();
+        push_local_db_to_ks("scan-quality", "push_kr", "kr.json", |url| {
+            kr::sync::push_kr(&url)
+        })
+        .await;
+    }
     Ok(())
 }
 
@@ -1195,7 +1302,7 @@ async fn recursive_scan_webdav(
     local_db: Option<&kr::db::SimpleJsonDatabase>,
     javdb: Option<&kl::javdb::JavdbScraper>,
     fc2: Option<&kl::fc2::Fc2Scraper>,
-    cache_dir: &std::path::Path,
+    cache_dir: &std::path::PathBuf,
     depth: usize,
     list_only: bool,
     cookie: Option<String>,
@@ -1589,6 +1696,7 @@ async fn run_scraper(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
                                         movie,
                                         added_time: std::time::SystemTime::now(),
                                         fav: false,
+                                        is_sd: None,
                                         markers: Vec::new(),
                                     };
                                     db.config.movies.push(movie_data);

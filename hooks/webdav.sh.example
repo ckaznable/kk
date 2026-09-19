@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install this file as ~/.config/kk/webdav.sh.
+# Each newly-added WebDAV video path is passed as one argument.
+for video_path in "$@"; do
+    printf 'New WebDAV video: %s\n' "$video_path"
+done
+
+# Put your own post-processing here, for example:
+# /path/to/your/indexer --path "$video_path"

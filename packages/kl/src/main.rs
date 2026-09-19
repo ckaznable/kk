@@ -5,12 +5,23 @@ use percent_encoding::percent_decode_str;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::{
     thread,
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncWriteExt, BufWriter};
 use walkdir::WalkDir;
+
+#[cfg(feature = "browser")]
+type BrowserScraper = kl::browser::BrowserScraper;
+#[cfg(feature = "browser")]
+type BrowserSession = kl::browser::BrowserSession;
+#[cfg(feature = "browser")]
+type BrowserContext<'a> = (&'a BrowserScraper, &'a BrowserSession);
+
+#[cfg(not(feature = "browser"))]
+type BrowserContext<'a> = ();
 
 fn has_url_encoded_bytes(path: &str) -> bool {
     path.as_bytes().windows(3).any(|window| {
@@ -254,8 +265,17 @@ fn run_test_scrape(
             // FC2 has a dedicated scraper; browser session scraping only supports JavDB.
             fc2.scrape(&id).await?
         } else if !headless {
-            let scraper = kl::browser::BrowserScraper::new().await?;
-            scraper.scrape_with_interaction(&id, true).await?
+            #[cfg(feature = "browser")]
+            {
+                let scraper = BrowserScraper::new().await?;
+                scraper.scrape_with_interaction(&id, true).await?
+            }
+            #[cfg(not(feature = "browser"))]
+            {
+                return Err(anyhow::anyhow!(
+                    "Browser scraping is unavailable; rebuild kl with --features browser or use --headless"
+                ));
+            }
         } else {
             javdb.scrape(&id).await?
         };
@@ -317,14 +337,22 @@ async fn run_fix_db(
 
     // Initialize browser session only when this run may actually scrape.
     let only_fix_num = fix_num && !test_first && !list_need_fix;
-    let mut browser_session = None;
+    #[cfg(feature = "browser")]
+    let mut browser_session: Option<BrowserSession> = None;
+    #[cfg(feature = "browser")]
     let browser_scraper = if !headless && !list_need_fix && !only_fix_num {
-        let scraper = kl::browser::BrowserScraper::new().await?;
+        let scraper = BrowserScraper::new().await?;
         browser_session = Some(scraper.start_session("https://javdb.com/").await?);
         Some(scraper)
     } else {
         None
     };
+    #[cfg(not(feature = "browser"))]
+    if !headless && !list_need_fix && !only_fix_num {
+        return Err(anyhow::anyhow!(
+            "Browser scraping is unavailable; rebuild kl with --features browser or use --headless"
+        ));
+    }
 
     let mut modified = false;
     let mut fix_count = 0;
@@ -568,6 +596,7 @@ async fn run_fix_db(
             if let Some(id) = id_opt {
                 println!("  Re-scraping ID: {}", id);
 
+                #[cfg(feature = "browser")]
                 let scrape_result = if let Some(session) = &browser_session {
                     if id.to_uppercase().starts_with("FC2") {
                         fc2.scrape(&id).await
@@ -579,6 +608,15 @@ async fn run_fix_db(
                             .await
                     }
                 } else {
+                    let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
+                        &fc2
+                    } else {
+                        &javdb
+                    };
+                    scraper.scrape(&id).await
+                };
+                #[cfg(not(feature = "browser"))]
+                let scrape_result = {
                     let scraper: &dyn Scraper = if id.to_uppercase().starts_with("FC2") {
                         &fc2
                     } else {
@@ -645,6 +683,7 @@ async fn run_fix_db(
         return Ok(());
     }
 
+    #[cfg(feature = "browser")]
     if let Some(session) = browser_session {
         session.browser.close().await?;
     }
@@ -746,9 +785,22 @@ async fn run_webdav_scraper(
             true,
             cookie,
             None,
+            &mut Vec::new(),
         )
         .await?;
         return Ok(());
+    }
+
+    if browser && headless {
+        return Err(anyhow::anyhow!(
+            "Choose only one scraper mode: --browser or --headless"
+        ));
+    }
+    #[cfg(not(feature = "browser"))]
+    if browser {
+        return Err(anyhow::anyhow!(
+            "Browser scraping is unavailable; rebuild kl with --features browser or use --headless"
+        ));
     }
 
     let javdb = kl::javdb::JavdbScraper::with_cookie(cookie.clone())?;
@@ -756,9 +808,11 @@ async fn run_webdav_scraper(
     let cache_dir = &*dirs::THUMB_CACHE_DIR;
 
     // Initialize browser session only when explicitly requested.
-    let mut browser_session = None;
+    #[cfg(feature = "browser")]
+    let mut browser_session: Option<BrowserSession> = None;
+    #[cfg(feature = "browser")]
     let browser_scraper = if browser && !headless {
-        let scraper = kl::browser::BrowserScraper::new().await?;
+        let scraper = BrowserScraper::new().await?;
         browser_session = Some(scraper.start_session("https://javdb.com/").await?);
         Some(scraper)
     } else {
@@ -766,6 +820,11 @@ async fn run_webdav_scraper(
     };
 
     // Use a queue for breadth-first search or just recursion. Let's use a recursive helper.
+    let mut added_paths = Vec::new();
+    #[cfg(feature = "browser")]
+    let browser_context = browser_scraper.as_ref().zip(browser_session.as_ref());
+    #[cfg(not(feature = "browser"))]
+    let browser_context = None;
     recursive_scan_webdav(
         &client,
         &remote_path,
@@ -777,10 +836,12 @@ async fn run_webdav_scraper(
         0,
         false,
         cookie,
-        browser_scraper.as_ref().zip(browser_session.as_ref()),
+        browser_context,
+        &mut added_paths,
     )
     .await?;
 
+    #[cfg(feature = "browser")]
     if let Some(session) = browser_session {
         session.browser.close().await?;
     }
@@ -791,6 +852,57 @@ async fn run_webdav_scraper(
         kr::sync::push_kwa(&url)
     })
     .await;
+
+    if let Some(hook) = find_webdav_hook() {
+        run_webdav_hook(&hook, &added_paths)?;
+    }
+    Ok(())
+}
+
+fn find_webdav_hook() -> Option<PathBuf> {
+    let config_dir = dirs::DIR.config_local_dir();
+    #[cfg(windows)]
+    let hook_name = "webdav.ps1";
+    #[cfg(not(windows))]
+    let hook_name = "webdav.sh";
+
+    let hook = config_dir.join(hook_name);
+    hook.is_file().then_some(hook)
+}
+
+fn run_webdav_hook(script: &Path, added_paths: &[String]) -> anyhow::Result<()> {
+    if added_paths.is_empty() {
+        println!("WebDAV hook skipped: no new videos.");
+        return Ok(());
+    }
+
+    println!(
+        "Running WebDAV hook {:?} with {} new video path(s).",
+        script,
+        added_paths.len()
+    );
+    #[cfg(windows)]
+    let status = Command::new("pwsh")
+        .args(["-NoProfile", "-File"])
+        .arg(script)
+        .args(added_paths)
+        .status()
+        .or_else(|_| {
+            Command::new("powershell")
+                .args(["-NoProfile", "-File"])
+                .arg(script)
+                .args(added_paths)
+                .status()
+        })?;
+    #[cfg(not(windows))]
+    let status = Command::new("sh").arg(script).args(added_paths).status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "WebDAV hook {:?} failed with status {}",
+            script,
+            status
+        ));
+    }
     Ok(())
 }
 
@@ -1087,7 +1199,8 @@ async fn recursive_scan_webdav(
     depth: usize,
     list_only: bool,
     cookie: Option<String>,
-    browser: Option<(&kl::browser::BrowserScraper, &kl::browser::BrowserSession)>,
+    browser: Option<BrowserContext<'_>>,
+    added_paths: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     // Limit depth to prevent infinite loops, but 5 should be plenty for "at least two levels"
     if depth > 5 {
@@ -1123,6 +1236,7 @@ async fn recursive_scan_webdav(
                 list_only,
                 cookie.clone(),
                 browser,
+                added_paths,
             )
             .await?;
             continue;
@@ -1204,6 +1318,8 @@ async fn recursive_scan_webdav(
             }
 
             let mut did_scrape = false;
+
+            #[cfg(feature = "browser")]
             let scrape_result = if let Some(m) = existing_movie {
                 Ok(m)
             } else if let Some((scraper, session)) = browser {
@@ -1213,6 +1329,19 @@ async fn recursive_scan_webdav(
                 } else {
                     scraper.scrape_session(session, &num, true).await
                 }
+            } else {
+                did_scrape = true;
+                let scraper: &dyn Scraper = if num.to_uppercase().starts_with("FC2") {
+                    fc2.unwrap()
+                } else {
+                    javdb.unwrap()
+                };
+                scraper.scrape(&num).await
+            };
+
+            #[cfg(not(feature = "browser"))]
+            let scrape_result = if let Some(m) = existing_movie {
+                Ok(m)
             } else {
                 did_scrape = true;
                 let scraper: &dyn Scraper = if num.to_uppercase().starts_with("FC2") {
@@ -1253,7 +1382,7 @@ async fn recursive_scan_webdav(
                     }
 
                     db.config.movies.push(kr::db::WebDavMovieData {
-                        url_path: res_path,
+                        url_path: res_path.clone(),
                         file_size: res.size,
                         movie,
                         added_time: std::time::SystemTime::now(),
@@ -1264,6 +1393,7 @@ async fn recursive_scan_webdav(
 
                     // Flush after each successful scrape to avoid losing progress
                     db.flush();
+                    added_paths.push(res_path);
                 }
                 Err(e) => eprintln!("  Scrape failed: {}", e),
             }

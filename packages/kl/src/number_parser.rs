@@ -18,6 +18,12 @@ pub fn get_number(path: &Path) -> Option<String> {
 
     let clean_name = clean_filename(&decoded_filename);
 
+    // Try numeric date-style format used by some sites, e.g. 052326-001.
+    let re_numeric = Regex::new(r"\b(\d{6})[-_](\d{3})\b").unwrap();
+    if let Some(caps) = re_numeric.captures(&clean_name) {
+        return Some(format!("{}-{}", &caps[1], &caps[2]));
+    }
+
     // Try standard format: ALPHA-DIGIT
     let re_std = Regex::new(r"([a-zA-Z]{2,5})[-_]?(\d{3,5})").unwrap();
     if let Some(caps) = re_std.captures(&clean_name) {
@@ -91,6 +97,14 @@ mod tests {
         assert_eq!(
             get_number(Path::new("%5Bdemo%5DIPZZ%2D221.mkv")).as_deref(),
             Some("IPZZ-221")
+        );
+    }
+
+    #[test]
+    fn parses_numeric_date_style_number() {
+        assert_eq!(
+            get_number(Path::new("052326-001.mp4")).as_deref(),
+            Some("052326-001")
         );
     }
 }
